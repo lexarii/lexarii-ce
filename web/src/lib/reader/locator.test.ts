@@ -502,7 +502,9 @@ describe('the text of a selection, on hostile input', () => {
 			const want = reference(s).trim() ? reference(s) : null;
 			expect(quotePre(s), JSON.stringify(s)).toBe(want);
 		}
-	});
+		// 2,000 small DOM chapters: half a second on a laptop, past vitest's
+		// 5s default on a slow CI runner. Correctness, not speed, is the point.
+	}, 30_000);
 
 	it('trims a <pre> made of several nodes as one', () => {
 		const parts = ['\n', 'int main() {', '\n  return 0;\n', '}', '\n   \n'];

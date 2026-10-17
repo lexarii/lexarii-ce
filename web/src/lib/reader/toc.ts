@@ -77,7 +77,10 @@ export function currentEntry<T extends TocNode>(
  * The last heading that starts on or before `page`, for a book whose contents
  * say nothing about where the reader is.
  */
-export function headingBefore(headings: readonly { title: string; page: number }[], page: number): string {
+export function headingBefore(
+	headings: readonly { title: string; page: number }[],
+	page: number
+): string {
 	let best = '';
 	for (const heading of headings) {
 		if (heading.page <= page && heading.title) best = heading.title;

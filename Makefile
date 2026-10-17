@@ -163,6 +163,9 @@ lint: ## format check, vet, linters
 	@# A var() naming a token nobody defines is silent in the browser: the
 	@# declaration is dropped and the property keeps its initial value.
 	cd web && npm run --silent check:tokens
+	@# CI's frontend job runs Prettier; checking here means a formatting slip
+	@# fails on the laptop instead of in CI.
+	cd web && npx prettier --check . >/dev/null || (cd web && npx prettier --check . 2>&1 | grep warn; echo "prettier: run 'cd web && npx prettier --write .'"; exit 1)
 
 migrate-up: ## apply migrations
 	go run github.com/pressly/goose/v3/cmd/goose@latest -dir migrations postgres "$(DATABASE_URL)" up

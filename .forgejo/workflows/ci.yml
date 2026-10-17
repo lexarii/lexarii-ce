@@ -121,11 +121,15 @@ jobs:
       # prebuilt release binary: a golangci-lint compiled by an older Go cannot
       # read a newer toolchain's export data and fails every package with a
       # typecheck error ("export data version 5 is greater than maximum
-      # supported version 4").
+      # supported version 4"). Building from source is not enough on its own:
+      # the reader of that export data is golang.org/x/tools inside
+      # golangci-lint, and v2.13.2's (x/tools v0.49) fails the same way on Go
+      # 1.27.2. v2.14.0 (x/tools v0.50) reads it. When a Go patch release turns
+      # this step red with that message again, raise this version.
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
-          version: v2.13.2
+          version: v2.14.0
           install-mode: goinstall
       - name: build
         run: CGO_ENABLED=0 go build ./...
@@ -245,11 +249,22 @@ jobs:
       ANDROID_HOME: /opt/android-sdk
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          # Matches compileOptions.sourceCompatibility in android/app/build.gradle.kts.
-          java-version: '17'
+      # Ubuntu's OpenJDK 17, not actions/setup-java: setup-java fetches Temurin
+      # through api.adoptium.net, which this runner's DNS filter answers with
+      # 0.0.0.0 ("connect ECONNREFUSED 0.0.0.0:443"), while the distribution's
+      # own mirror is always reachable. 17 matches compileOptions in
+      # android/app/build.gradle.kts.
+      - name: a JDK 17
+        run: |
+          set -eu
+          as_root=""
+          [ "$(id -u)" -eq 0 ] || as_root="sudo"
+          $as_root apt-get update -qq
+          $as_root apt-get install -y -qq --no-install-recommends openjdk-17-jdk-headless >/dev/null
+          java_home="$(dirname "$(dirname "$(readlink -f "$(command -v javac)")")")"
+          echo "JAVA_HOME=$java_home" >> "$GITHUB_ENV"
+          echo "$java_home/bin" >> "$GITHUB_PATH"
+          "$java_home/bin/java" -version
 
       - name: install the Android SDK (command-line tools, platform 35, build-tools 35.0.0)
         run: |

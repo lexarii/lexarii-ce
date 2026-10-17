@@ -182,13 +182,16 @@ export function serve() {
 		if (url.pathname.startsWith('/img/')) {
 			const w = Number(url.searchParams.get('w') ?? 300);
 			const h = Number(url.searchParams.get('h') ?? 300);
-			setTimeout(() => {
-				res.writeHead(200, { 'content-type': 'image/svg+xml' });
-				res.end(
-					`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">` +
-						`<rect width="${w}" height="${h}" fill="#bbb"/></svg>`
-				);
-			}, Number(url.searchParams.get('ms') ?? 0));
+			setTimeout(
+				() => {
+					res.writeHead(200, { 'content-type': 'image/svg+xml' });
+					res.end(
+						`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">` +
+							`<rect width="${w}" height="${h}" fill="#bbb"/></svg>`
+					);
+				},
+				Number(url.searchParams.get('ms') ?? 0)
+			);
 			return;
 		}
 		const bridge = url.searchParams.get('bridge');
