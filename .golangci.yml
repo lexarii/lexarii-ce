@@ -1,0 +1,18 @@
+# golangci-lint configuration.
+#
+# The default linter set is deliberately kept: errcheck, govet, ineffassign,
+# staticcheck and unused. Nothing here adds a style linter, because the tree
+# already has gofmt and a reviewer, and a linter that argues about names costs
+# more attention than it saves.
+version: "2"
+
+issues:
+  # Show everything, every time.
+  #
+  # The defaults cap a linter at 50 findings and the SAME finding at 3, which is
+  # sensible for a wall of output and misleading here: an unchecked Close is the
+  # same finding in twenty places, so the run reports three, they get fixed, and
+  # the next run reports three more. That is exactly how this repository ended
+  # up believing it had 14 issues when it had 23.
+  max-issues-per-linter: 0
+  max-same-issues: 0

@@ -1,0 +1,140 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+/*
+ * Lexarii design tokens.
+ *
+ * Every component reads these. No hardcoded hex values in components, ever.
+ * Warm, paper-like, restrained: the covers are the colour, the UI is not.
+ */
+
+:root {
+	/* --- Type scale (1.200 minor third) --- */
+	--font-serif: 'Literata', 'Iowan Old Style', 'Charter', Georgia, serif;
+	--font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+	--font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', Menlo, monospace;
+
+	--text-xs: 0.694rem;
+	--text-sm: 0.833rem;
+	--text-base: 1rem;
+	--text-lg: 1.2rem;
+	--text-xl: 1.44rem;
+	--text-2xl: 1.728rem;
+	--text-3xl: 2.074rem;
+
+	--leading-tight: 1.25;
+	--leading-normal: 1.5;
+	--leading-reading: 1.6;
+
+	/* --- Spacing (4px base) --- */
+	--space-1: 0.25rem;
+	--space-2: 0.5rem;
+	--space-3: 0.75rem;
+	--space-4: 1rem;
+	--space-6: 1.5rem;
+	--space-8: 2rem;
+	--space-12: 3rem;
+	--space-16: 4rem;
+
+	/* --- Radii & shadows --- */
+	--radius-sm: 3px;
+	--radius-md: 6px;
+	--radius-lg: 10px;
+	--shadow-book: 0 1px 2px rgb(0 0 0 / 0.08), 0 4px 12px rgb(0 0 0 / 0.1);
+	--shadow-raised: 0 2px 8px rgb(0 0 0 / 0.12);
+
+	/* --- Overlays on cover art ---
+	   A progress bar sits on top of an arbitrary image: a real cover can be
+	   white paper or a black photograph, so neither the page palette nor a
+	   single translucent tone is legible on both. A dark track with a light
+	   fill is: on pale art the track carries the contrast, on dark art the
+	   fill does. These do NOT change between themes, because the thing they
+	   sit on does not either. */
+	--overlay-track: rgb(0 0 0 / 0.55);
+	--overlay-fill: #f2ece1;
+
+	/* --- Behind a modal dialog ---
+	   Dims whatever the page is showing so the question in front reads as the
+	   only thing to answer. Dark in every theme, like the overlays above: it
+	   sits over the page, whatever colour the page is. */
+	--backdrop: rgb(0 0 0 / 0.4);
+
+	/* --- Layout --- */
+	--measure: 68ch; /* 60-75 characters: the single most important reading setting */
+	--cover-aspect: 2 / 3;
+
+	/* --- Motion --- */
+	--ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+	--duration-fast: 120ms;
+	--duration-page-turn: 280ms;
+
+	/* --- Colour: light (paper) --- */
+	--bg: #faf8f4;
+	--bg-raised: #ffffff;
+	--bg-sunken: #f1ede5;
+	--fg: #1f1c18;
+	--fg-muted: #6b6558;
+	--fg-subtle: #97907f;
+	--border: #e2dbcd;
+	--accent: #7a5c3e;
+	--accent-fg: #ffffff;
+	--focus-ring: #3b6ea5;
+	--danger: #a33b32;
+}
+
+/* Explicit user choice wins in both directions. */
+:root[data-theme='dark'] {
+	--bg: #16151a;
+	--bg-raised: #201e26;
+	--bg-sunken: #100f13;
+	--fg: #e8e4dc;
+	--fg-muted: #9b958a;
+	--fg-subtle: #6d675e;
+	--border: #322f3a;
+	--accent: #c9a97f;
+	--accent-fg: #16151a;
+	--focus-ring: #7aa7d8;
+	--danger: #d8756a;
+	--shadow-book: 0 1px 2px rgb(0 0 0 / 0.4), 0 4px 12px rgb(0 0 0 / 0.5);
+	--shadow-raised: 0 2px 8px rgb(0 0 0 / 0.5);
+}
+
+:root[data-theme='sepia'] {
+	--bg: #f4ecd8;
+	--bg-raised: #faf4e4;
+	--bg-sunken: #e8dec4;
+	--fg: #3a2f21;
+	--fg-muted: #6f5f47;
+	--border: #ddd0b0;
+}
+
+/* True black for OLED. */
+:root[data-theme='black'] {
+	--bg: #000000;
+	--bg-raised: #0b0b0d;
+	--bg-sunken: #000000;
+	--fg: #ddd9d2;
+	--border: #232326;
+}
+
+/* System preference, only when the user has not chosen explicitly. */
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme='light']):not([data-theme='sepia']):not([data-theme='black']) {
+		--bg: #16151a;
+		--bg-raised: #201e26;
+		--bg-sunken: #100f13;
+		--fg: #e8e4dc;
+		--fg-muted: #9b958a;
+		--fg-subtle: #6d675e;
+		--border: #322f3a;
+		--accent: #c9a97f;
+		--accent-fg: #16151a;
+		--focus-ring: #7aa7d8;
+		--danger: #d8756a;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	:root {
+		--duration-fast: 1ms;
+		--duration-page-turn: 1ms;
+	}
+}

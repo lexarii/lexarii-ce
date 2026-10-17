@@ -1,0 +1,7 @@
+First release.
+
+* Sign in to a Lexarii server and stay signed in.
+* Browse and search your library.
+* Read EPUBs with the web reader's own pagination and positions.
+* Keep a book on the device and read it offline.
+* Highlight and annotate; synced both ways, including marks shared to you.

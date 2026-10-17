@@ -1,0 +1,81 @@
+<!doctype html>
+<!--
+  Placeholder, not the application.
+
+  This file is tracked so that a plain `go build` compiles: go:embed fails
+  outright on an empty directory, and internal/http/static is otherwise
+  generated. `make build` overwrites it with the real SvelteKit output, so
+  seeing this page means the binary was built without the client.
+
+  That also means `make build` leaves this file modified in the working tree.
+  Do not commit that version: it references hashed assets under _app/ which are
+  not in the repository, so a fresh clone would serve a broken page instead of
+  this explanation. `git checkout internal/http/static/index.html` puts it back.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lexarii — client not built</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100dvh;
+        display: grid;
+        place-items: center;
+        padding: 2rem;
+        font:
+          16px/1.6 system-ui,
+          sans-serif;
+        background: #faf8f5;
+        color: #2b2723;
+      }
+      main {
+        max-width: 34rem;
+      }
+      h1 {
+        margin: 0 0 0.5rem;
+        font-size: 1.4rem;
+      }
+      p {
+        margin: 0 0 1rem;
+      }
+      code {
+        padding: 0.1rem 0.35rem;
+        border-radius: 0.25rem;
+        background: #ece7e0;
+        font-size: 0.95em;
+      }
+      a {
+        color: inherit;
+      }
+      @media (prefers-color-scheme: dark) {
+        body {
+          background: #171513;
+          color: #e8e3dc;
+        }
+        code {
+          background: #2a2622;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>The web client has not been built</h1>
+      <p>
+        The API is running and serving requests — this placeholder only replaces
+        the reading interface. Build the client and restart:
+      </p>
+      <p><code>make build</code></p>
+      <p>
+        For development with live reload, <code>make dev</code> runs the client
+        on its own port and proxies the API.
+      </p>
+      <p>
+        The server is healthy if
+        <a href="/api/v1/health">/api/v1/health</a> answers.
+      </p>
+    </main>
+  </body>
+</html>

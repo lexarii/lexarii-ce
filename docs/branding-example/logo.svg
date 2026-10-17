@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-label="Example logo">
+	<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+	<!-- A placeholder mark for docs/branding-example: replace it with your own. -->
+	<rect x="4" y="4" width="40" height="40" rx="10" fill="#1d5c63"/>
+	<path d="M14 14h6v16h14v6H14z" fill="#ffffff"/>
+</svg>

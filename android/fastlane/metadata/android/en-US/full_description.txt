@@ -1,0 +1,29 @@
+Lexarii is a self-hosted ebook library, reader, and research assistant. This
+app is the Android client for it - it needs a Lexarii server that you (or
+someone you trust) already run. It does not talk to any other service: every
+request goes to the server address you enter when you sign in, and nowhere
+else.
+
+Get a server running first, at https://scm.poniatowski.dev/adam/lexarii
+(a GitHub mirror is planned; see the project's README for the current source).
+Docker Compose and a single static binary are both supported.
+
+What the app does today:
+
+* Sign in to your server with a username and password, and stay signed in
+  across restarts.
+* Browse your library: covers, titles, authors, search.
+* Read EPUBs, with the same pagination and locator-based positions as the
+  web reader, so a page you turn on your phone lines up exactly on your
+  desktop.
+* Keep a book on the device and read it with no network at all.
+* Highlight and annotate from the text-selection menu. Notes and highlights
+  are kept on the device first and synced to the server when it is reachable,
+  including marks shared to you by someone else on the same server.
+
+What is not here yet: PDF reading, and a settings screen for typography.
+Both are on the roadmap.
+
+This app talks only to your own server, over plain HTTP or HTTPS as you
+configure it. It has no analytics, no crash reporting, no advertising, and no
+dependency on Google Play Services.

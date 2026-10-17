@@ -1,0 +1,179 @@
+# Titles a real library of 168 books actually produced, as PlausibleTitle sees
+# them. A line marked BAD must be rejected; every other line must be accepted.
+#
+# The bad ones all came from the MODEL rather than from the files: asked for a
+# book's title, gemma4-12b sometimes answers with the whole title page, and
+# once with a remark about the title page, which was then shown on a shelf as
+# the name of a book.
+#
+# Real titles are here too, and they are the more important half: rejecting one
+# puts a book on the shelf as "Untitled" and leaves somebody guessing. The
+# longest real title here is 159 characters and the shortest dumped title page
+# is 278, which is where the length limit comes from.
+97 Things Every Java Programmer Should Know
+97 Things Every Java Programmer Should Know
+Alexander Raul
+Algebra Essentials
+Algorithmic Thinking
+Analytical Performance Modeling For Computer Sytems, Third Edition
+Analytical Skills for AI and Data Science
+Analytical Techniques for Solving Nonlinear Partial Differential Equations
+An Introduction to Multivariable Mathematics
+An Introduction To Numerical Methods For The Physical Sciences
+An Introduction To Partial Differential Equations
+Applied Linear Algebra and Optimization using MATLAB
+Applied Text Analysis with Python
+Ashlock Lee
+bash Cookbook
+Bayesian Statistics the Fun Way
+BAD	BirminghamMumbai
+C# 8.0 in a Nutshell
+Classic Shell Scripting
+Commutative Algebra: An Introduction
+Concurrency in C# Cookbook, Second Edition
+Continuous Distributions in Engineering and the Applied Sciences Part I
+Continuous Distributions in Engineering and the Applied Sciences Part II
+C Programming and Numerical Analysis: An Introduction
+Cybersecurity Ops with bash
+Deep Learning: A Visual Approach
+Deep Learning Cookbook
+Deep Learning for the Life Sciences
+Deep Learning from Scratch
+DevOps Adoption Strategies: Principles, Processes, Tools, and Trends
+DevOps Culture and Practice with OpenShift
+DevOps Paradox: The truth about DevOps by the people on the front line
+Dimensional Analysis for Unit Conversion Using MATLAB
+Direct Energy Conversion Technologies
+Discrete Distributions in Engineering and the Applied Sciences
+Discrete Mathematics with Cryptographic Applications: A Self-Teaching Introduction
+Dive into Algorithms: A Pythonic Adventure for the Intrepid Beginner
+Docker Certified Associate (DCA): Exam Guide
+Docker Cookbook
+Docker for Developers
+BAD	Driving DevOps with Value Stream Management, Improve IT value stream delivery with a proven VSM methodology to compete in the digital economy, Driving DevOps with Value Stream Management, Cecil 'Gary' Rupp, BIRMINGHAM-MUMBAI, Driving DevOps with Value Stream Management, Copyright © 2021 Packt
+Econometrics in Practice
+Effective awk Programming
+Effective C: An Introduction to Professional C Programming
+Electrical Engineering Exam Prep: Problems and Solutions
+Essentials of Applied Mathematics for Engineers and Scientists: Second Edition
+Essentials of Game Theory: A Concise, Multidisciplinary Introduction
+Essentials of Modern Algebra: Second Edition
+Fast Start Advanced Calculus
+Fast Start Differential Calculus
+Fast Start Integral Calculus
+FINITE ELEMENT ANALYSIS: A Primer
+FLIGHT SCIENCE: Mathematics, Techniques, Sensibility.
+Fluent Python
+Foundations of Mathematics: Algebra, Geometry, Trigonometry, Calculus'
+Generative Deep Learning
+Geometry Creation and Import with COMSOL Multiphysics
+Google Cloud for DevOps Engineers
+grep Pocket Reference
+Hands-On Docker for Microservices with Python
+Hands-on Kubernetes on Azure, Third Edition
+BAD	Hands-On Kubernetes on WindowsEﬀectively orchestrate Windows container workloads usingKubernetesPiotr TylendaBIRMINGHAM - MUMBAIHands-On Kubernetes on WindowsEﬀectively orchestrate Windows container workloads usingKubernetesPiotr TylendaBIRMINGHAM - MUMBAIHands-On Kubernetes on
+BAD	Hands-On Microservices with Kubernetes Build, deploy, and manage scalable microservices on KubernetesGigi SayfanBIRMINGHAM - MUMBAI Hands-On Microservices with Kubernetes. Note: The title page text is slightly garbled in the source, but the primary title is Hands-On Microservices with Kubernetes. I'
+Hands-On Unsupervised Learning Using Python
+Head First Agile
+Head First Android Development
+Head First C
+Head First C#, 5th Edition
+Head First Go
+Head First HTML and CSS, Second Edition
+Head First Java
+Head First JavaScript Programming
+Head First Kotlin
+Head First Learn to Code
+Head First PMP, 4e
+Head First Python
+Head First Ruby
+Head First SQL
+Head First Statistics
+How Computers Really Work: A Hands-On Guide to the Inner Workings of the Machine
+Impractical Python Projects
+Introducing Go
+Introducing Regular Expressions
+Introduction to Logic, Third Edition
+Introduction to Statistics Using R
+iOS Swift Game Development Cookbook
+Java Cookbook
+Kotlin Cookbook
+BAD	kubectl: Command-Line Kubernetes in a Nutshell, Deploy, manage, and debug container workloads using the Kubernetes CLI, Rimantas Mocevicius, BIRMINGHAM-MUMBAI, kubectl: Command-Line Kubernetes in a Nutshell, Copyright © 2020 Packt PublishingAll rights reserved. No part of this book may be
+Kubernetes A Complete DevOps Cookbook
+Kubernetes and Docker – An Enterprise Guide
+Kubernetes in Production Best Practices
+Learn Docker – Fundamentals of Docker 19.x, Second Edition
+Learning DevOps: The complete guide to accelerate collaboration with Jenkins, Kubernetes, Terraform and Azure DevOps
+Learning Java
+Learning Perl
+Learning SQL, Third Edition
+Learning the bash Shell
+Learning the vi and Vim Editors
+Learn Kubernetes Security
+Learn Python Visually: Creative Coding with Processing.py
+Linear Algebra
+Linux Device Drivers, Third Edition
+LINUX in a Nutshell
+Linux Observability with BPF
+Linux Pocket Guide, 3E
+Linux System Programming
+Machine Learning Pocket Reference
+Machine Learning with Python Cookbook
+BAD	Mastering Kubernetes, Third Edition, Level up your container orchestration skills with Kubernetes to build, run, secure, and observe large-scale distributed apps, Gigi Sayfan, BIRMINGHAM - MUMBAI, Mastering Kubernetes, Third Edition, Copyright © 2020 Packt PublishingAll rights reserved. No part of
+Mastering Regular Expressions, Third Edition
+Mathematical Basics of Motion and Deformation in Computer Graphics, Second Edition
+Mathematical Methods for Physics Using MATLAB and Maple
+MATHEMATICAL PHYSICS
+Mathematics for Business, Seventh Edition
+Mathematics for Computer Graphics and Game Programming
+Mathematics for Mechanical Engineers: Problems and Solutions
+MATLAB for Engineering and the Life Sciences
+Matrices in Engineering Problems
+BAD	MECHANICAL ENGINEERINGEXAM PREP: Problems and Solutions Layla S. Mayboudi, PhD MLI Exam Prep SeriesSarhan Musa, PhDPrairie View A&M(Series Editor) MERCURY LEARNING AND INFORMATION Dulles, VirginiaBoston, MassachusettsNew Delhi Copyright ©2021 by MERCURY LEARNING AND INFORMATION LLC. All rights r s
+Monte Carlo Methods: A Hands-On Computational Introduction Utilizing Excel
+Multiphysics Modeling Using COMSOL�5 and MATLAB�, 2/E
+Multivariable and Vector Calculus: An Introduction
+NATURAL LANGUAGE PROCESSING WITH PYTHON AND SPACY: A PRACTICAL INTRODUCTION
+Natural Language Processing with PyTorch
+Natural Language Processing with Spark NLP
+Newtonian Mechanics: A Modelling Approach (Second Edition)
+Numerical Methods in Engineering and Science
+Practical Artificial Intelligence with Swift
+Practical Automated Machine Learning on Azure
+Practical Deep Learning
+Practical Natural Language Processing
+Practical SQL: A Beginner’s Guide to Storytelling with Data
+Probability and Statistics for STEM: A Course in One Semester
+Programming Fundamentals Using MATLAB
+Programming PHP
+Programming PyTorch for Deep Learning
+Programming Rust
+Programming Scala
+Programming TypeScript
+Python Cookbook, Third Edition
+Python Playground: Geeky Projects for the Curious Programmer
+Raspberry Pi Cookbook
+R Cookbook
+Real-World Python: A Hacker’s Guide to Solving Problems with Code”
+Regular Expressions Cookbook, Second Edition
+Reinforcement Learning
+R Graphics Cookbook
+BAD	Second Edition
+sed & awk
+Select Ideas in Partial Differential Equations
+Serverless Architectures with Kubernetes
+SQL Cookbook
+Statistics is Easy! Case Studies on Real Scientific Datasets
+Statistics is Easy! Second Edition
+Strengthening Deep Neural Networks
+Structural Steel Design: Third Edition
+Tensor Analysis for Engineers: Transformations-Mathematics-Applications: Second Edition
+The Art of R Programming
+The Book of R
+The Docker Workshop
+The Kubernetes Workshop
+BAD	The Special Theory of Relativity: An Introduction, Original title: Empty Space Is Amazing Stuff: The Special Theory of Relativity and the Nature of Space. (Note: The text lists 'The Special Theory of Relativity: An Introduction' as the current title and 'Empty Space Is Amazing Stuff' as the original
+Think Julia
+Unity Game Development Cookbook
+Unix Power Tools
+Using Asyncio in Python

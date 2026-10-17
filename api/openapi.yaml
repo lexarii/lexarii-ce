@@ -1,0 +1,3877 @@
+# GENERATED FILE - DO NOT EDIT.
+#
+# Paths come from api/paths.yaml; component schemas are read out of the Go
+# types in internal/http/dto. Edit one of those and run `make api-spec`.
+openapi: 3.1.0
+info:
+  title: Lexarii API
+  version: 0.0.1
+  description: |
+    The HTTP contract between the Go server and the SvelteKit client.
+
+    Component schemas in the generated api/openapi.yaml are read out of the Go
+    types in internal/http/dto and must not be edited by hand. The paths below
+    are written by hand, because what an endpoint MEANS is not derivable from a
+    struct. Run `make api-spec` after changing either.
+
+    Conventions, applied without exception: camelCase JSON, RFC3339 timestamps,
+    UUID string ids, cursor pagination (`?limit=&cursor=` returning
+    `{items, nextCursor}`), one error shape, and `202 {jobId}` with SSE progress
+    for anything long-running.
+
+    Authentication is a session cookie. Everything except /health and the
+    /auth/* endpoints that establish a session requires one, and answers 401
+    with the standard error shape when it is missing.
+
+    The library is SHARED and reading is PRIVATE. Works, files, tags and
+    passages belong to the installation; annotations, reading position and
+    conversations belong to the person. Endpoints that change the shared half -
+    scanning, enrichment, resolving suggestions, cancelling jobs - require an
+    administrator and answer 403 `not_an_admin` otherwise. Uploading does too,
+    unless the installation's upload policy lets everybody add books to their
+    own shelf. Reading, annotating and asking never do: they are the point of
+    having an account and they affect nobody else.
+
+    A file can have several HOLDERS: everybody who added it. Each holder has
+    full owner rights to it - reading, downloading, lending - and sees and
+    revokes only the lending they did themselves. "Owner only" below means any
+    holder.
+servers:
+  - url: /api/v1
+
+tags:
+  - name: library
+    description: Browsing the collection
+  - name: reader
+    description: Serving book content to the reader
+  - name: annotations
+    description: Highlights and notes
+  - name: progress
+    description: Where the reader has got to
+  - name: ask
+    description: Questions answered from the library
+  - name: enrichment
+    description: Model-proposed metadata, awaiting a decision
+  - name: jobs
+    description: Long-running work
+  - name: auth
+    description: Sessions and identity
+  - name: sync
+    description: Reconciling a client that has been reading offline
+  - name: system
+    description: Health
+
+paths:
+  /health:
+    get:
+      tags: [system]
+      summary: Liveness and readiness
+      description: |
+        Open, because probes carry no session. An anonymous caller learns the
+        overall status and nothing else: no version, no dependency names, no
+        hostnames, no error text.
+
+        `ok` and `degraded` answer 200 and `down` answers 503. Degraded means
+        an optional dependency (a model server) is unreachable; the library
+        and reader work with no model at all, and reporting that as down would
+        be wrong. `down` means a required dependency, the database, is
+        unreachable. The database is checked live on every call.
+
+        When the caller holds an administrator session the response also
+        carries `version`, `checks` (one line per dependency, with the error
+        message when it is failing) and `degraded`, so a self-hoster debugging
+        "the AI does nothing" can see which leg is down. A signed-in user who
+        is not an administrator gets the anonymous shape.
+
+        Model endpoints are not pinged per request. Each result, failures
+        included, is reused for 30 seconds and concurrent requests share one
+        ping, so polling this endpoint, however fast, causes at most one
+        outbound request per model endpoint per window.
+      security: []
+      responses:
+        '200':
+          description: Healthy, possibly degraded
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+        '503':
+          description: A required dependency is unreachable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+
+  /library:
+    get:
+      tags: [library]
+      summary: A page of the library
+      parameters:
+        - { name: search, in: query, schema: { type: string }, description: Full-text and trigram search over titles and authors }
+        - { name: tag, in: query, schema: { type: string } }
+        - { name: authorId, in: query, schema: { type: string, format: uuid } }
+        - { name: status, in: query, schema: { type: string }, description: Ingest status }
+        - { name: sort, in: query, schema: { type: string, enum: [added, title, author, recent] } }
+        - { name: includeMissing, in: query, schema: { type: boolean }, description: Include files absent from disk }
+        - { name: owned, in: query, schema: { type: string, enum: [mine, shared] }, description: Whose books to list. Omitted means every book the viewer may read; `shared` means books other people lent them }
+        - { name: limit, in: query, schema: { type: integer } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        '200':
+          description: One page, with a cursor when more remain
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LibraryPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /subjects:
+    get:
+      tags: [library]
+      summary: What this library is about
+      description: |
+        Subjects ordered by how many books carry them, counted over the books
+        the viewer may read. `slug` is what the shelf filters on: `/?tag=<slug>`.
+
+        The long tail is not collapsed here. On a real library 136 of 218
+        subjects name exactly one book - bayesian statistics, ansible, device
+        drivers, econometrics - and each is a true and specific fact about a
+        book. Ordering by count puts the shape of the library first and leaves
+        the tail reachable; deciding what to show of it is the client's job.
+      responses:
+        '200':
+          description: Commonest first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SubjectList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /stats:
+    get:
+      tags: [library]
+      summary: Collection totals
+      responses:
+        '200':
+          description: Counts by format, status, and health
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Stats' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /works/{id}:
+    get:
+      tags: [library]
+      summary: One work, with its editions and files
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The work
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkDetail' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [library]
+      summary: Correct a book's details by hand
+      description: |
+        Most books arrive described by whatever the file happened to contain,
+        and in a real library that is often nothing: of the 168 books this was
+        built against, 70 had no author at all and three had a title taken off
+        the wrong line of a title page. Until now the only way to change any of
+        it was to accept or reject a model's suggestion.
+
+        A field LEFT OUT is left alone. A field present and empty is CLEARED,
+        which is a real instruction - a subtitle a scanner read off a cover as
+        "Second Edition" needs removing, not keeping. Send only what changed:
+        every field in the body is recorded as the reader's own, and a field
+        recorded that way is never filled in again by a scan or a catalogue
+        lookup.
+
+        That last part is the point. Correcting a title and finding it reverted
+        by the next scan is the thing people give up over, and it happens
+        because the correction and the import write to the same column with
+        nothing to say which knows better. Here the provenance ledger says.
+
+        `authors` replaces the whole list in order, because the case that
+        matters is removing a wrong name rather than adding a missing one.
+        `year` of 0 clears the publication date.
+
+        Only somebody who holds EVERY file of this work may edit it - the same
+        rule merging follows. A reader a book was shared with can mark it up;
+        renaming it for everybody is a different act, and so is renaming a
+        book of which you hold only one copy while its other files are
+        somebody else's. Both are answered as though the book did not exist.
+        An ISBN is accepted whether or not anybody else's edition carries it.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateWork' }
+      responses:
+        '200':
+          description: The book as it now reads
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WorkDetail' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /books/{id}/info:
+    get:
+      tags: [reader]
+      summary: What the reader needs before opening a file
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Format, title, and where to fetch content
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BookInfo' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /books/{id}/file:
+    get:
+      tags: [reader]
+      summary: The book file itself
+      description: |
+        Served for formats the client renders whole, PDF in particular. Range
+        requests are supported so a large PDF does not have to be downloaded
+        before its first page can be shown.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The file
+          content:
+            application/pdf: { schema: { type: string, format: binary } }
+            application/epub+zip: { schema: { type: string, format: binary } }
+        '206': { description: A byte range of the file }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /books/{id}/manifest:
+    get:
+      tags: [reader]
+      summary: Spine and table of contents
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The reading order and the TOC, with locators
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReaderManifest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /books/{id}/spine/{index}:
+    get:
+      tags: [reader]
+      summary: One spine item's sanitised HTML
+      description: |
+        The HTML is sanitised server-side before it is sent. Ebooks are
+        untrusted input and this is the boundary where that is enforced; the
+        client must never be the only thing standing between a book's markup
+        and the DOM.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: index, in: path, required: true, schema: { type: integer }, description: Zero-based spine position }
+      responses:
+        '200':
+          description: The chapter
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SpineContent' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /books/{id}/assets/{path}:
+    get:
+      tags: [reader]
+      summary: An image or stylesheet from inside the book
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: path, in: path, required: true, schema: { type: string }, description: Path within the archive. Guarded against traversal. }
+      responses:
+        '200':
+          description: The asset
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /books/{id}/page/{n}:
+    get:
+      tags: [reader]
+      summary: One page of a PDF, as a one-page PDF
+      description: |
+        This is how a PDF shared for READING is served. The whole-file endpoint
+        requires the download permission; this one does not, because a book
+        shared to be read has to be readable.
+
+        The book is parsed once and held open: measured on a 54 MB reference
+        work, parsing takes 3.6 seconds and writing a page out of the parsed
+        result takes 2 milliseconds. A small number of books are cached, evicted
+        least-recently-used.
+
+        Be honest about what this achieves. Several hundred requests is a
+        script, and anything on screen can be photographed. It makes taking the
+        book something other than one click, and makes the attempt visible in
+        the request log. It is not protection.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: n, in: path, required: true, schema: { type: integer }, description: One-based page number }
+        - name: prefetch
+          in: query
+          schema: { type: string, enum: ['1'] }
+          description: |
+            Set by the reader when fetching a page on somebody's behalf rather
+            than because they turned to it. The page is served identically; the
+            difference is in the audit, where a prefetch counts as a request but
+            not as a page read. Without it, someone who looked at page 10 would
+            be recorded as having seen 9, 10 and 11.
+      responses:
+        '200':
+          description: A single-page PDF document
+          content:
+            application/pdf: { schema: { type: string, format: binary } }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /books/{id}/annotations/import:
+    post:
+      tags: [reader]
+      summary: Import the highlights a PDF carries in its own file
+      description: |
+        A PDF can hold highlights made in whatever reader somebody used before
+        this one. They are rectangles, and turning a rectangle back into words
+        needs the geometry of the rendered text - which the browser has and the
+        server does not, so the client reads them and posts what it found.
+
+        Replaces whatever the last import produced for this book, because a
+        PDF's annotations carry no identity that survives an edit. Marks made
+        in the reader are never touched.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ImportMarks' }
+      responses:
+        '200':
+          description: How many were kept
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImportResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /collections:
+    get:
+      tags: [library]
+      summary: The reader's own groupings of their books
+      description: |
+        A collection is hand-curated and nestable - "To read", "Chapter 3
+        sources" - as distinct from a tag, which is flat and usually written by
+        a model. Private to whoever made it: a borrowed book does not bring
+        somebody else's arrangement with it.
+      responses:
+        '200':
+          description: Every collection this person has made, with book counts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CollectionList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [library]
+      summary: Make a collection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CollectionRequest' }
+      responses:
+        '201':
+          description: The collection
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Collection' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /collections/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [library]
+      summary: One collection and the books in it
+      responses:
+        '200':
+          description: The collection and its books
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CollectionDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    patch:
+      tags: [library]
+      summary: Rename a collection or change its description
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CollectionRequest' }
+      responses:
+        '200':
+          description: The collection
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Collection' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [library]
+      summary: Delete a collection
+      description: |
+        The books are untouched. A collection is an arrangement of a shelf, not
+        a container that owns what is in it, and deleting "To read" must never
+        be a way to lose a book.
+      responses:
+        '204': { description: Deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /collections/{id}/works/{workId}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+      - name: workId
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    put:
+      tags: [library]
+      summary: Put a book in a collection
+      description: |
+        Idempotent: a book already in the collection is success. Both have to
+        be the asker's - their collection, and a book they can actually read.
+      responses:
+        '204': { description: In the collection }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [library]
+      summary: Take a book out of a collection
+      responses:
+        '204': { description: Removed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /works/{id}/mentions:
+    get:
+      tags: [library]
+      summary: The books in this library that name this one
+      description: |
+        A backlink between books is not a link somebody typed. It is a
+        bibliography entry, an index line, a "further reading" list - one book
+        naming another in its own text - so it has to be found, and the
+        full-text index built for retrieval already holds it.
+
+        The test is the title as a phrase plus the author's surname in the same
+        passage. The title alone is not enough: measured on a library of 168
+        books, "Linear Algebra" as a phrase appears in 23 other books and cites
+        nothing, because a title that is also a subject matches every book
+        about the subject. With the surname, 31 of those 168 books have at
+        least one mention and the ones checked by hand are real.
+
+        A book whose title is one word, or whose author's surname is under four
+        letters, returns nothing: both match far too much to be worth showing.
+
+        Only books this person can open are searched, and only they are named.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The mentions, the book naming this one most often first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MentionList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /works/{id}/citation:
+    get:
+      tags: [library]
+      summary: One book as a citation
+      description: |
+        BibTeX, RIS, or CSL-JSON, rendered from what the library knows. Nothing
+        is looked up or guessed: a field the library does not have is left out,
+        because a citation with an invented year gets pasted into somebody's
+        bibliography and read as a fact.
+
+        The citation key is surname, year, and the first significant word of the
+        title - `knuth1968art` - and is stable across exports, so a key cannot
+        change under a document that cites it.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: format
+          in: query
+          description: bibtex (default), ris, or csl-json
+          schema:
+            type: string
+            enum: [bibtex, ris, csl-json]
+        - name: download
+          in: query
+          description: Any value offers the response as a file rather than showing it
+          schema: { type: string }
+      responses:
+        '200':
+          description: The citation
+          content:
+            text/plain:
+              schema: { type: string }
+            application/x-research-info-systems:
+              schema: { type: string }
+            application/json:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /citations:
+    get:
+      tags: [library]
+      summary: A shelf as a bibliography
+      description: |
+        The same filters as the library listing, so "everything tagged
+        distributed-systems" is one request. Only what the viewer can read is
+        included, because it goes through the same query the shelf does.
+
+        Capped at 500 books per export.
+      parameters:
+        - name: q
+          in: query
+          description: Free-text filter, as on the library listing
+          schema: { type: string }
+        - name: tag
+          in: query
+          description: Tag slug, as on the library listing
+          schema: { type: string }
+        - name: collection
+          in: query
+          description: |
+            One of the reader's own collections. The usual reason to want a
+            bibliography: the books behind one chapter or one essay.
+          schema: { type: string, format: uuid }
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [bibtex, ris, csl-json]
+        - name: download
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: The bibliography
+          content:
+            text/plain:
+              schema: { type: string }
+            application/x-research-info-systems:
+              schema: { type: string }
+            application/json:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /covers/pending:
+    get:
+      tags: [library]
+      summary: Books that still need a cover rendered
+      description: |
+        A PDF's cover is its first page, and rasterising that needs a renderer
+        the server does not have - the good ones need cgo, which CGO_ENABLED=0
+        rules out. The browser has one, already uses it to show these books, and
+        is idle while somebody browses a shelf, so the client works through this
+        list and uploads what it renders.
+      responses:
+        '200':
+          description: Readable files with no cover yet, most likely to be seen first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoverTargets' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /books/{id}/cover:
+    get:
+      tags: [library]
+      summary: A book's cover image
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The cover
+          content:
+            image/webp: { schema: { type: string, format: binary } }
+            image/jpeg: { schema: { type: string, format: binary } }
+            image/png: { schema: { type: string, format: binary } }
+        '404': { $ref: '#/components/responses/NotFound' }
+    put:
+      tags: [library]
+      summary: Store a cover rendered by the client
+      description: |
+        The image is sniffed rather than believed: the magic bytes decide what
+        it is, not the Content-Type, because this writes a client-supplied file
+        to disk that is served back later. The stored name is generated here and
+        never taken from the request.
+
+        Allowed to anyone who can READ the book, not only its owner. A cover
+        comes from the first page, which a reader has already seen; making it
+        owner-only would leave a shared book blank for the person it was shared
+        with.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          image/webp: { schema: { type: string, format: binary } }
+          image/jpeg: { schema: { type: string, format: binary } }
+          image/png: { schema: { type: string, format: binary } }
+      responses:
+        '204': { description: Stored }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /books/{id}/annotations:
+    get:
+      tags: [annotations]
+      summary: Every annotation in one book
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The annotations, in reading order
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnnotationList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [annotations]
+      summary: Create a highlight or note
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateAnnotation' }
+      responses:
+        '201':
+          description: The stored annotation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Annotation' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /books/{id}/annotations/orphaned:
+    post:
+      tags: [annotations]
+      summary: Report which annotations could not be painted
+      description: |
+        The reader reports both directions: ids it failed to anchor AND ids it
+        resolved. A one-way flag is a trap - an annotation orphaned by a
+        transient rendering failure would stay marked forever even once the
+        text came back.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/OrphanAnnotations' }
+      responses:
+        '200':
+          description: How many were marked and cleared
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OrphanResult' }
+
+  /annotations:
+    get:
+      tags: [annotations]
+      summary: Recent annotations across the library
+      description: |
+        Every mark the viewer made on a book they can still open, newest
+        first, a page at a time. Pages are keyed on when each mark was made,
+        so a note made while somebody pages does not repeat or skip a row.
+      parameters:
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200 }, description: Page size; 50 when omitted or out of range }
+        - { name: cursor, in: query, schema: { type: string }, description: The previous page's `nextCursor` }
+      responses:
+        '200':
+          description: One page, with a cursor when more remain
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RecentAnnotationList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /annotations/{id}:
+    patch:
+      tags: [annotations]
+      summary: Change a note or colour
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UpdateAnnotation' }
+      responses:
+        '200':
+          description: The updated annotation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Annotation' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [annotations]
+      summary: Delete an annotation
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /books/{id}/progress:
+    get:
+      tags: [progress]
+      summary: Where this reader has got to
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Current and furthest position
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReadingProgress' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    put:
+      tags: [progress]
+      summary: Save a position
+      description: |
+        Current position moves freely, forwards and backwards. The furthest
+        position only ever advances, so that flicking back to check something
+        does not destroy the record of how far the book has been read.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SaveProgress' }
+      responses:
+        '200':
+          description: The stored progress
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ReadingProgress' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /continue:
+    get:
+      tags: [progress]
+      summary: Books to pick back up
+      responses:
+        '200':
+          description: In-progress books, most recently read first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ContinueList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /ask:
+    post:
+      tags: [ask]
+      summary: Ask one question, without a thread
+      description: |
+        Stateless. Same pipeline as a conversation but nothing is stored, which
+        is what a script wants. Use /conversations to keep the history.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AskRequest' }
+      responses:
+        '200':
+          description: The answer, its sources, and what routing decided
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Answer' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /conversations:
+    get:
+      tags: [ask]
+      summary: The reader's threads
+      responses:
+        '200':
+          description: Threads, most recently used first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConversationList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [ask]
+      summary: Ask a question, starting a new thread
+      description: |
+        The thread is named after the question that started it. The question is
+        stored before the model is asked, so one that takes thirty seconds and
+        then fails is still in the thread.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AskRequest' }
+      responses:
+        '200':
+          description: The answer, carrying the new conversation id
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Answer' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /conversations/stream:
+    post:
+      tags: [ask]
+      summary: Ask a question in a new thread, streaming the answer
+      description: |
+        Server-sent events. An answer takes 14-36 seconds on a local model, and
+        this exists so the wait is legible rather than shorter.
+
+        Events, in order: `conversation` as soon as the thread exists, so a
+        reload during the answer finds it; `passages` when retrieval finishes,
+        seconds before the first token; `delta` repeatedly, each carrying one
+        piece of text; then `done` with the complete stored answer, or `error`.
+
+        Everything that can fail with a status code fails before the stream
+        opens: once headers are sent, a 404 can no longer be reported.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AskRequest' }
+      responses:
+        '200':
+          description: |
+            An event stream of ConversationSummary, Source[], AnswerDelta, and
+            finally Answer.
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /conversations/{id}:
+    get:
+      tags: [ask]
+      summary: One thread and its messages
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The thread, oldest message first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Conversation' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [ask]
+      summary: Delete a thread
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /conversations/{id}/messages:
+    post:
+      tags: [ask]
+      summary: Ask a follow-up
+      description: |
+        The thread's history is carried into routing as well as into the
+        answer. Routing "and how is it used in practice?" on its own produces a
+        search for the words "in practice".
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AskRequest' }
+      responses:
+        '200':
+          description: The answer
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Answer' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /conversations/{id}/messages/stream:
+    post:
+      tags: [ask]
+      summary: Ask a follow-up, streaming the answer
+      description: As /conversations/stream, in an existing thread.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AskRequest' }
+      responses:
+        '200':
+          description: An event stream, as /conversations/stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /scan:
+    post:
+      tags: [jobs]
+      summary: Scan the library directory
+      description: |
+        The library directory is read-only and this never writes to it. Work is
+        keyed on content hash, so rescanning is idempotent and resumable.
+
+        Administrators only: the library is shared, so adding to it changes what
+        everyone sees.
+      responses:
+        '202':
+          description: Accepted; follow the job
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JobAccepted' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /enrich:
+    post:
+      tags: [enrichment]
+      summary: Ask the model to describe books it has not seen
+      description: |
+        Publisher metadata beats model output. Values land as suggestions or
+        fill empty fields; they never overwrite what the file declared.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StartEnrichment' }
+      responses:
+        '202':
+          description: Accepted, with how many books were queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnrichmentStarted' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          description: No model is configured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /index:
+    post:
+      tags: [enrichment]
+      summary: Chunk and embed books so they can be searched
+      responses:
+        '202':
+          description: Accepted, with how many files were queued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/IndexingStarted' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '503':
+          description: No embedding model is configured
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /suggestions:
+    get:
+      tags: [enrichment]
+      summary: What the model has proposed, awaiting a decision
+      responses:
+        '200':
+          description: Pending suggestions
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SuggestionList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /suggestions/{id}/accept:
+    post:
+      tags: [enrichment]
+      summary: Apply a suggestion
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Applied }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /suggestions/{id}/reject:
+    post:
+      tags: [enrichment]
+      summary: Discard a suggestion
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Discarded }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /people:
+    get:
+      tags: [library]
+      summary: The accounts a book can be shared with
+      description: |
+        Usernames only. A share picker needs a name to point at; nothing about
+        it needs an email address, and handing those to every account would be
+        a contact list nobody agreed to.
+
+        With `LEXARII_PEOPLE_DIRECTORY=none` only an administrator gets the
+        list. Anybody else gets an empty one (200, not 404, so a client that
+        does not know the setting shows "nobody to share with" rather than an
+        error) and names a recipient by username instead: `POST
+        /books/{id}/shares` and `POST /books/{id}/annotations/shares`. Which of
+        the two a person gets is `canListPeople` on `/auth/me`.
+      responses:
+        '200':
+          description: Everyone but the caller, or nobody (see above)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PersonList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /books/{id}/shares:
+    get:
+      tags: [library]
+      summary: Who you have shared a book with
+      description: |
+        Owner only. A book that is not yours reports 404 rather than 403,
+        because "you may not share this" would confirm that it exists.
+
+        Only the caller's own grants. When somebody else also holds the file,
+        whom they lend it to is not listed here and cannot be revoked from here.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Everyone this file is shared with
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ShareList' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    post:
+      tags: [library]
+      summary: Lend a book to somebody named by their username
+      description: |
+        For an installation that does not list its people. The same grant as
+        `PUT /books/{id}/shares/{userId}`, and as idempotent; the name is
+        matched without regard to case, and the reply is the share, carrying
+        the account's id for changing or ending it.
+
+        The book is checked first. One that is not the caller's to lend is the
+        plain 404 `not_found` it always was, whatever name came with it, and
+        the name is not looked up - so this is no way to ask whether a
+        username exists without holding a book.
+
+        A name nobody has is then 404 with code `user_not_found`. That says
+        whether a username exists - which signing in deliberately does not -
+        and is the price of lending by name: a neutral reply would leave
+        somebody believing they had lent a book to nobody. Usernames name
+        people here; they are not credentials. Names that match nobody are
+        counted per person, across this route and
+        `POST /books/{id}/annotations/shares`: after 8 in 15 minutes every
+        name, known or not, is 429 `too_many_unknown_names` for 15 minutes,
+        with `Retry-After`. Naming yourself is 400.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ShareByUsername' }
+      responses:
+        '200':
+          description: The share made
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Share' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429':
+          description: Too many names that match nobody lately; retry after the Retry-After header
+
+  /books/{id}/shares/{userId}:
+    put:
+      tags: [library]
+      summary: Set one person's access to one book
+      description: |
+        Owner only, and idempotent: the body says what the access should BE,
+        so a toggle does not have to know whether a share already exists.
+
+        Sharing is per FILE rather than per work, because someone can
+        reasonably be given the EPUB and not the 158 MB PDF.
+
+        `annotations` shares the owner's own highlights and notes on this book,
+        readable and never editable. It requires read access by construction -
+        marginalia without the text it marks leaks that text one highlight at a
+        time - and is withdrawn automatically when the book is unshared.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ShareRequest' }
+      responses:
+        '204': { description: The share now matches the request }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [library]
+      summary: Withdraw the access you gave someone
+      description: |
+        Their view of the owner's notes goes with it: marginalia visible for a
+        book somebody can no longer open would outlive the decision to stop
+        sharing.
+
+        Withdraws the caller's own grant only. If another holder of the same
+        file also lends it to this person, they keep reading it through that
+        grant; 404 when the caller had not shared it with them.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Withdrawn }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /books/{id}/holding:
+    delete:
+      tags: [library]
+      summary: Take a book off your own shelf
+      description: |
+        The caller stops holding this file. Under `/books/{id}` like every other
+        per-file endpoint (`{id}` is a book file id), and singular because it is
+        always the caller's own holding - as `/books/{id}/progress` is always
+        the caller's own position. Nobody, administrators included, can end
+        somebody else's holding here.
+
+        What goes with it: the books the caller lent from this file stop being
+        lent by them, and their notes on it stop being shared unless they can
+        still read the book through somebody else's grant. Anybody else who
+        holds the file keeps it, and keeps lending it.
+
+        What stays: the caller's own highlights, notes and reading position on
+        this file. They are not deleted, just as they are not when a lent book
+        is withdrawn; adding the same file again brings them back. Deleting
+        them is a separate, explicit act.
+
+        When the caller was the last holder, the book is archived exactly as if
+        their account had been deleted - kept, listed for an administrator to
+        hand on, and moved into the archive if Lexarii stores the file.
+
+        Letting go is remembered: a later scan of the library directory, or an
+        extraction of the caller's own upload still in the queue, does not
+        put the book back. Uploading the same file again does.
+
+        Always 204 on success, whether or not the book was archived: whether
+        anybody else holds the file is not the caller's to learn. A file the
+        caller does not hold - including one merely lent to them - is 404,
+        never 403.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: No longer on the caller's shelf }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /books/{id}/access:
+    get:
+      tags: [library]
+      summary: Who has read this book, and how much of it
+      description: |
+        Owner only, and only the reading done through the caller's own grants:
+        each row records who lent the book at the time it was read, so the
+        history outlives a revoked grant and says nothing about another
+        holder's lending.
+
+        `book_access` records the permission; this records the fact, which is
+        the half that makes a leak attributable rather than merely discouraged.
+
+        Reading your OWN library is never recorded - the check is in the
+        statement that writes, not in a handler - so every row here is about
+        somebody else. An audit trail over a person's own reading is not an
+        audit trail.
+
+        Rows are aggregated per person, book, day and kind: `views` counts
+        requests, `units` counts the DISTINCT pages or chapters seen, and `of`
+        is how many the book has. `units` approaching `of` in one day is what a
+        bulk extraction looks like.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Most recent first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccessLog' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /books/{id}/annotations/shares:
+    get:
+      tags: [library]
+      summary: Who you share your own notes on this book with
+      description: |
+        YOUR shares, not everybody's. Who else has shared notes on the same book
+        would answer a question about the owner's other readers.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: Account ids, and the same accounts with their usernames
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/NoteShareList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [library]
+      summary: Share your notes on this book with somebody named by their username
+      description: |
+        For an installation that does not list its people; otherwise the same
+        as `PUT /books/{id}/annotations/shares/{userId}`. As for lending, the
+        book is checked first - one the caller cannot read is the plain 404
+        `not_found`, and the name is not looked up - then a name nobody has is
+        404 `user_not_found`, counted against the same per-person limit (429
+        `too_many_unknown_names`); naming yourself is 400.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/NoteShareByUsername' }
+      responses:
+        '200':
+          description: Who the notes are now shared with
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Recipient' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '429':
+          description: Too many names that match nobody lately; retry after the Retry-After header
+
+  /books/{id}/annotations/shares/{userId}:
+    put:
+      tags: [library]
+      summary: Share your notes on this book with somebody
+      description: |
+        Sharing YOUR marks, which is not the book owner's decision: a borrower's
+        marginalia is theirs. The caller must be able to read the book.
+
+        The recipient is deliberately not checked. Refusing - or even
+        reporting - a recipient who cannot read the book would tell the caller
+        who else the owner lent it to. The share is recorded as an intention,
+        and the annotation listing requires access to the book at the point of
+        reading, so a recipient without it sees nothing and one who is given the
+        book later sees the notes then.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Shared }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [library]
+      summary: Stop sharing your notes on this book with somebody
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: No longer shared }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /users/{id}:
+    delete:
+      tags: [library]
+      summary: Delete an account
+      description: |
+        An administrator may delete anybody; anybody may delete themselves. The
+        last administrator cannot be deleted, because an installation without
+        one is one where books can never be added, scanned, or handed on.
+
+        What goes is the PERSON: annotations, reading positions, conversations
+        and collections, immediately and by cascade. What stays is the books
+        they owned, archived against their name so an administrator can hand
+        them on and so they are still there if the person comes back. Books they
+        had BORROWED need nothing - their access ends and the book is simply its
+        owner's again.
+
+        The audit log keeps its rows and stops naming them: what a borrower read
+        is the lending owner's record, not the borrower's data.
+
+        Files are moved into Lexarii's archive only when Lexarii stored them.
+        A book scanned from the library directory stays where it is: that
+        directory is read-only, and moving somebody's own file out of their own
+        folder is not archiving, it is taking it.
+
+        With `LEXARII_DELETED_ACCOUNT_FILES=erase` the books only they held
+        are ERASED instead (`filesErased`): their records, passages, covers
+        and access logs, everybody's notes on them, and the copies Lexarii
+        stored - never a file in the library directory. A book somebody else's
+        upload of the same bytes is still waiting for is kept, archived with no
+        name (`booksArchived`). The stored copies are deleted once the
+        deletion has committed; any that cannot be yet - the disk refused, or
+        an upload of the same bytes is waiting - stay owed, are counted in
+        `copiesPending`, and are deleted later without anybody asking.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: What happened to the books
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AccountDeleted' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Only an administrator can delete somebody else }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /archive:
+    get:
+      tags: [library]
+      summary: Books left behind by deleted accounts
+      description: |
+        Administrators only. `kept` says whether the file was moved into
+        Lexarii's archive; false means it is still in the library directory it
+        was scanned from, which is where it belongs.
+
+        Records are deleted after six months. The files are not.
+      responses:
+        '200':
+          description: Most recently archived first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ArchivedBooks' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Administrators only }
+
+  /archive/{id}/claim:
+    post:
+      tags: [library]
+      summary: Give an archived book a new owner
+      description: |
+        Administrators only. An empty body gives it to the administrator making
+        the request, which is the common case. The book becomes an ordinary
+        book again: an owner, a place on a shelf, and no archive record.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClaimRequest' }
+      responses:
+        '204': { description: Claimed }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Administrators only }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/users/{id}/erase-files:
+    post:
+      tags: [library]
+      summary: Erase the books only this person holds, now
+      description: |
+        Administrators only, whatever `LEXARII_DELETED_ACCOUNT_FILES` says.
+        For a retention rule that reaches a person's books before it reaches
+        the person: the account stays.
+
+        Exactly what erasing on account deletion does to those files: each
+        book only they hold goes - its record, passages, cover and access log,
+        the notes and reading positions on it (theirs and anybody they lent it
+        to), and the copies Lexarii stored. A file in the library directory is
+        never touched; its record goes, and the release is remembered so a
+        scan does not hand it back to them. Books they share with another
+        holder stay on both shelves, and one somebody else's upload of the
+        same bytes is still waiting for is left alone (`kept`).
+
+        Their own uploads not extracted yet are withdrawn: the upload no
+        longer waits to reach their shelf, a queued extraction of it is
+        cancelled and its stored copy deleted (or owed, while anybody else's
+        upload of the same bytes still needs it), and the release is
+        remembered, so no later extraction of those bytes - theirs already
+        running, or somebody else's - gives them the book. Uploading it again
+        does. `withdrawn` counts them.
+
+        It goes in batches of 1,000 files, a transaction each. The stored
+        copies are deleted after each erasure commits; any that cannot be yet
+        stay owed (`copiesPending`) and are deleted later without anybody
+        asking. A failure part-way leaves the batches before it erased, and
+        answers 500; erasing again finishes, and is otherwise harmless.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: What was erased
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FilesErased' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Only an administrator can erase somebody's books }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/books/{id}/remove:
+    post:
+      tags: [library]
+      summary: Take a file off the installation for everybody
+      description: |
+        Administrators only. For a file nobody here may keep: `{id}` is a book
+        file id, and any administrator may remove any file, whoever holds it.
+
+        The file leaves every shelf at once - every holder's, and that of
+        anybody whose upload of it is still being extracted - and every grant
+        made from it and every share of somebody's notes on it ends. Its
+        passages, their vectors and its cover are deleted, and so is every
+        copy Lexarii itself stored (uploads, the archive). A file in the
+        library directory is never touched: that directory is read-only, and
+        the block is what keeps a scan from finding it again.
+
+        The bytes are then BLOCKED, by content hash: an upload of them is
+        refused with 422 `content_blocked`, a scan passes over them, and an
+        extraction already queued records nothing. `reason` (at most 1000
+        characters) is kept on the blocklist for administrators.
+
+        What people wrote stays theirs: highlights, notes and reading
+        positions on the file are kept, as when somebody takes a book off
+        their own shelf, and come back if the block is lifted and the file
+        added again. So do the file's words quoted outside it: the text each
+        highlight on it quotes, the excerpt (up to 400 characters) each chat
+        citation of it keeps, and whatever an assistant's answer quoted.
+        `purgeQuotes: true` erases the highlight quotes and the citation
+        excerpts in the same transaction, keeping the highlights, notes,
+        citations and their places; an answer's own text is never rewritten.
+
+        `removedFor` counts the people the file was taken from; who they were
+        is not in the reply. Deleting the stored copies happens after the
+        removal commits and runs to the end even if the client has gone; if
+        it fails, the blocklist says `copiesRemain` and
+        `/admin/blocked/{hash}/discard` finishes it, as does the next start of
+        the server. Removing a file again is harmless and keeps the first
+        reason.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RemoveForEveryoneRequest' }
+      responses:
+        '200':
+          description: Removed and blocked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RemovedForEveryone' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Administrators only }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503':
+          description: |
+            `try_again`: people kept coming to have something of the file -
+            a grant, a chat citation - while it was being removed, and the
+            removal stopped rather than chase them. Nothing was changed.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /admin/blocked:
+    get:
+      tags: [library]
+      summary: Files removed for everybody and kept off
+      description: |
+        Administrators only. Most recent first. `title` is the title the file
+        had while its record lasts - the record expires with the archive,
+        after which only the hash is left. `blockedBy` is absent once that
+        administrator's account is gone; the block outlives them.
+        `copiesRemain` is true while some copy Lexarii itself stored may still
+        be on disk.
+      responses:
+        '200':
+          description: The blocklist
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/BlockedFiles' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Administrators only }
+
+  /admin/blocked/{hash}:
+    delete:
+      tags: [library]
+      summary: Lift a block
+      description: |
+        Administrators only. Nothing comes back by itself, and the bytes may be
+        uploaded or scanned again from now on. An uploaded file's bytes were
+        deleted by the removal, so only adding them again brings that book
+        back - with every mark on it - and its record stays out of the
+        archive meanwhile, since there is nothing to hand on. A file in the
+        library directory was never deleted: the next scan that finds it
+        marks it present and the archive offers it again (a scan never puts
+        an archived book on a shelf by itself).
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+      responses:
+        '204': { description: Lifted }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Administrators only }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /admin/blocked/{hash}/discard:
+    post:
+      tags: [library]
+      summary: Finish deleting a removed file's stored copies
+      description: |
+        Administrators only. Deletes, again, every copy Lexarii itself stored
+        of blocked bytes - uploads, archive copies, the cover - when the first
+        attempt did not finish (`copiesRemain` on the blocklist). Never
+        anything in the library directory. The reply says whether any may
+        still remain.
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[0-9a-f]{64}$' }
+      responses:
+        '200':
+          description: Tried again
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DiscardedCopies' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { description: Administrators only }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /shares/activity:
+    get:
+      tags: [library]
+      summary: What has happened lately to the books you lent
+      description: |
+        The books this person has lent, across all of them, for the last
+        fortnight.
+
+        `/books/{id}/access` answers "who read THIS book" and needs somebody to
+        already suspect the book. This answers the question that nothing could:
+        the log recorded faithfully and warned nobody.
+
+        `notable` marks a row worth acting on - most of a book in one day, or a
+        whole-file download. A download is notable whatever its size, because
+        the file has left the installation. A book with no unit count recorded
+        can only be judged by that rule, since there is nothing to measure the
+        rest against.
+      responses:
+        '200':
+          description: Most recent first, with a count of the notable rows
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SharingActivity' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /uploads:
+    post:
+      tags: [library]
+      summary: Add files to your library
+      description: |
+        Multipart. Uploaded files go to the data directory, never to the
+        read-only library directory. Archives are guarded against traversal and
+        decompression bombs before anything is extracted.
+
+        Administrators only, unless the installation sets
+        `LEXARII_UPLOAD_POLICY=users`, in which case anybody signed in may
+        upload. `User.canUpload` says which applies to the caller. Each file is
+        capped at `LEXARII_MAX_UPLOAD_MB` either way.
+
+        Every file uploaded goes on the CALLER'S shelf, whoever else already
+        has the same bytes. `duplicate` means only that the caller already has
+        this file; a file somebody else added is answered exactly as a new one
+        would be - `stored`, with a job id of the caller's own - so the reply
+        never says what anybody else here owns. The bytes, text and index are
+        stored once however many people hold them, which also means such a
+        book arrives already processed: the reply is indistinguishable, the
+        shared file is not.
+
+        An upload only joins an edition (by ISBN or filename stem) that the
+        caller already holds a file of; it never attaches to somebody else's
+        book.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                files:
+                  type: array
+                  items: { type: string, format: binary }
+      responses:
+        '200':
+          description: What was accepted and what was refused
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '422':
+          description: |
+            Every file in the request was refused because an administrator has
+            removed those bytes from the installation (`content_blocked`). The
+            reply says that and nothing else: not who added the file, who
+            removed it or why. In a batch with anything else in it, a blocked file is
+            instead reported as `rejected` with `code: content_blocked`.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '500':
+          description: |
+            A file was stored but could not be put on the caller's shelf. The
+            request stops there, in the standard error shape, rather than
+            calling the file stored: nothing else would add it. The files
+            before it in the batch are stored and the caller's; uploading the
+            batch again adds the rest.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /jobs/{id}:
+    get:
+      tags: [jobs]
+      summary: One job's state
+      description: |
+        For the person the job was queued for, and for administrators. Anybody
+        else gets 404, as for a job that does not exist: a job's progress note
+        and error describe a file, and the file may be somebody else's.
+
+        A finished job is kept for `LEXARII_JOB_RETENTION` (30 days by
+        default) and then deleted: 404. Once an administrator erases a
+        person's books, that person's finished jobs no longer say who they
+        were for, and only administrators get them.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: The job
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Job' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [jobs]
+      summary: Cancel a job
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '204': { description: Cancelled }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /jobs/{id}/events:
+    get:
+      tags: [jobs]
+      summary: Follow a job
+      description: |
+        Server-sent events: `progress` when anything changes, `done` when the
+        job reaches a terminal state, `error` if it is lost. A keep-alive
+        comment every twenty seconds stops intermediaries closing a long, quiet
+        job's connection.
+
+        The same rule as `GET /jobs/{id}`: the person the job was queued for,
+        or an administrator, and 404 for anybody else.
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        '200':
+          description: An event stream of Job
+          content:
+            text/event-stream:
+              schema: { type: string }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # The OPDS catalogue is not described here. It is at /opds rather than under
+  # /api/v1, it answers Atom XML rather than the JSON this document describes,
+  # and its shape is somebody else's specification rather than this project's
+  # contract. docs/ARCHITECTURE.md explains what it serves and why.
+
+  /sync:
+    get:
+      tags: [sync]
+      summary: What changed for this reader since a moment
+      description: |
+        For a client that has been reading offline. Returns this person's own
+        marks and reading positions that changed after `since`, the marks that
+        were DELETED, and the server's own clock as `until`.
+
+        When `more` comes back true, a page was filled and another is
+        waiting: send the `cursor` this response carries back as the `cursor`
+        parameter to get the NEXT page. Do not re-send `since` to page - it is
+        not what advances a page and never was; resending it just re-reads the
+        same starting window; `since` only matters for the FIRST call of a
+        round. `cursor` is opaque - store and return exactly what was given,
+        never construct one.
+
+        Only once `more` comes back false - the round is finished - store
+        `until` as the next `since` and discard the cursor. `until` is the
+        server's clock at that final read, never the client's own: two clocks
+        a minute apart would silently lose or repeat a minute of somebody's
+        reading. A fresh round (no `cursor`) actually reads from a couple of
+        seconds before `since`, because a row's timestamp is set when its
+        statement runs and becomes visible only when its transaction commits,
+        which is later - a row can be freshly written but not yet visible to
+        the exact moment `since` names. That overlap applies once, at the
+        start of a round; it does not reopen between pages of the same round,
+        so it cannot trap paging behind a burst of changes that share one
+        instant - repeats are free regardless, because every apply is keyed
+        by id.
+
+        A client that never adopts `cursor` still works for whatever fits in
+        one page: send `since`, read the results, ignore `more`. It will not
+        make progress past the first page of a round that does not fit,
+        which is exactly the paging `cursor` exists for.
+
+        Deletions are listed rather than implied. An absent mark is
+        indistinguishable from one the client has not been told about yet, so
+        without this a highlight deleted on a laptop comes back the next time
+        the phone syncs.
+
+        Scoped to this person's OWN marks. Somebody else's shared highlights
+        are readable in the reader and are not theirs to carry away and edit.
+      parameters:
+        - name: since
+          in: query
+          description: |
+            RFC3339. Absent means everything, which is what a fresh install
+            wants. Ignored when `cursor` is present - `cursor` already knows
+            where a round in progress left off.
+          schema: { type: string, format: date-time }
+        - name: cursor
+          in: query
+          description: |
+            Resumes a round in progress. Only ever a value this endpoint
+            returned as `cursor` on an earlier page of the SAME round; sending
+            back an old or unrelated one is a 400, not a silent reset to page
+            one.
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 1000 }
+      responses:
+        '200':
+          description: Everything that changed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SyncPull' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [sync]
+      summary: What this client did while it was away
+      description: |
+        Marks made, edited or deleted offline, and where books were left.
+
+        Every mark carries an id the CLIENT generated and a timestamp of when
+        the CLIENT made the change. Both matter. The id makes this safe to
+        repeat - the connection that drops is the one carrying the response -
+        and the timestamp is what decides conflicts, because a phone that was
+        in a tunnel for a week did not edit anything at the moment it found
+        signal.
+
+        Marks resolve last-write-wins by that timestamp, per mark. A deletion
+        beats an edit: a mark that comes back from the dead is the failure
+        people notice, and an edit lost to a delete looks like the delete they
+        asked for. A mark the server holds a newer version of comes back
+        `stale`, and the newer version arrives on the next pull.
+
+        Positions are not last-write-wins, because a position is two facts.
+        Where the reader IS takes the newest by the reader's clock, backwards
+        included - turning back a chapter is reading. How far they GOT only
+        ever advances, from any device, with no clock involved, so a laptop
+        that opened chapter one cannot erase an evening's reading on a phone.
+
+        One refused book does not discard the rest of the push.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SyncPush' }
+      responses:
+        '200':
+          description: What became of each pushed mark
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SyncPushResult' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/providers:
+    get:
+      tags: [auth]
+      summary: How this installation lets people sign in
+      description: >-
+        Open, because the sign-in page needs it before anybody is signed in.
+        Lists the sign-in providers, whether first-run setup is needed, and
+        the administrator's own links for the sign-in page from
+        LEXARII_SIGNIN_LINKS (`links`, empty when none are configured). Every
+        link's href is a path on this server beginning with "/" or an https
+        URL; the server refuses to start with anything else. `branding` is
+        true when the installation serves its own stylesheet at
+        /branding/branding.css (LEXARII_BRANDING_DIR, or an embedder serving
+        /branding/ itself), which the client loads after its own styles; see
+        docs/BRANDING.md.
+      security: []
+      responses:
+        '200':
+          description: The providers, whether first-run setup is needed, the sign-in page links, and whether there is branding
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthOptions' }
+
+  /auth/setup:
+    post:
+      tags: [auth]
+      summary: Create the first account
+      description: Refused once any account exists.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SetupRequest' }
+      responses:
+        '200':
+          description: The new user, signed in
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Sign in with a password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginRequest' }
+      responses:
+        '200':
+          description: Signed in; the session cookie is set
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/token:
+    post:
+      tags: [auth]
+      summary: Sign in a client that holds its own token
+      security: []
+      description: |
+        The same credentials and the same sessions as `/auth/login`; the
+        difference is where the token ends up. A browser gets an HttpOnly
+        cookie it cannot read. A native client gets the token in the body,
+        stores it itself, and sends it back as `Authorization: Bearer <token>`
+        on every request.
+
+        That is a weaker position than a cookie - there is no HttpOnly and no
+        same-origin policy on a phone - and it is the right one for a client
+        that is not a web page. It is a separate endpoint for exactly that
+        reason: no web client can be talked into asking for a token it would
+        then have to keep within reach of an injected script.
+
+        `device` is required. The token lasts a month and lives on a thing
+        that gets lost, and every Android client sends the same user-agent, so
+        the name the person types here is the only thing that tells their
+        phone from their tablet in the session list a year later. It is shown
+        there, marked as an app, and can be revoked on its own.
+
+        The token is returned ONCE. Only its SHA-256 is stored, so a lost
+        token is replaced rather than recovered.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TokenRequest' }
+      responses:
+        '200':
+          description: The token, shown once
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthToken' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429':
+          description: Too many failed sign-ins; retry after the Retry-After header
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      summary: End this session
+      responses:
+        '204': { description: Signed out }
+
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: Who is signed in
+      responses:
+        '200':
+          description: The current user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/sessions:
+    get:
+      tags: [auth]
+      summary: Every session for this account
+      responses:
+        '200':
+          description: Sessions, with the current one marked
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionList' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/sessions/{id}:
+    delete:
+      tags: [auth]
+      summary: Revoke one session
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        '204': { description: Revoked }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /auth/sessions/revoke-all:
+    post:
+      tags: [auth]
+      summary: Sign out everywhere
+      responses:
+        '204': { description: All sessions revoked }
+
+  /auth/{provider}/start:
+    get:
+      tags: [auth]
+      summary: Begin federated sign-in
+      description: The path carries the provider name, so adding one needs no new route.
+      security: []
+      parameters:
+        - { name: provider, in: path, required: true, schema: { type: string } }
+      responses:
+        '302': { description: Redirect to the identity provider }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /auth/{provider}/callback:
+    get:
+      tags: [auth]
+      summary: Complete federated sign-in
+      security: []
+      parameters:
+        - { name: provider, in: path, required: true, schema: { type: string } }
+        - { name: code, in: query, schema: { type: string } }
+        - { name: state, in: query, schema: { type: string } }
+        - { name: error, in: query, schema: { type: string } }
+      responses:
+        '302': { description: Redirect back into the app, signed in }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+# Either way of carrying a session is accepted on every endpoint: a browser's
+# cookie, or a native client's bearer token.
+security:
+  - sessionCookie: []
+  - bearerToken: []
+
+components:
+  schemas:
+    AccessLog:
+      type: object
+      description: "AccessLog is who has read a book."
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AccessRecord'
+    AccessRecord:
+      type: object
+      description: "AccessRecord is one person's reading of one book on one day."
+      required: [userId, username, day, kind, views, units, of, firstAt, lastAt]
+      properties:
+        userId:
+          type: string
+        username:
+          type: string
+        day:
+          type: string
+        kind:
+          type: string
+          description: "Kind is page, chapter, or file."
+        views:
+          type: integer
+          description: "Views counts requests; Units counts the DISTINCT pages or chapters seen. The gap between them is re-reading, and Units against Of is how much of the book this person has actually taken."
+        units:
+          type: integer
+        of:
+          type: integer
+        firstAt:
+          type: string
+          format: date-time
+        lastAt:
+          type: string
+          format: date-time
+    AccountDeleted:
+      type: object
+      description: "AccountDeleted reports what deleting an account did to the books it owned."
+      required: [booksArchived, filesMoved, filesErased, copiesPending]
+      properties:
+        booksArchived:
+          type: integer
+          description: "BooksArchived is how many books were kept in the archive: against the deleted name, or - when erasing - with no name, because somebody else's upload of the same bytes is still waiting to make them theirs."
+        filesMoved:
+          type: integer
+          description: "FilesMoved is how many of those files Lexarii actually moved into its archive. The rest live in a library directory, which is read-only and is not Lexarii's to tidy: they stay exactly where their owner put them."
+        filesErased:
+          type: integer
+          description: "FilesErased is how many books only this person held were erased rather than archived (LEXARII_DELETED_ACCOUNT_FILES=erase): their records, what was derived from them, and the copies Lexarii stored. Zero when archiving."
+        copiesPending:
+          type: integer
+          description: "CopiesPending counts the content hashes - of erased books, and of the person's own uploads that were still waiting to be extracted - whose stored copies could not be deleted yet: the disk refused, or an upload of the same bytes is on its way. They are owed, and deleted later without anybody asking. Zero when archiving."
+    Annotation:
+      type: object
+      description: "Annotation is a highlight, note, or bookmark."
+      required: [id, bookFileId, type, start, end, orphaned, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        bookFileId:
+          type: string
+        type:
+          type: string
+        start:
+          type: string
+          description: "Start and End are canonical locator strings. They anchor to the document's structure, so they survive a font-size change; they do not survive the document itself changing, which is what Orphaned reports."
+        end:
+          type: string
+        selectedText:
+          type: string
+          description: "SelectedText is the text as it read when the mark was made. It is what an orphaned annotation is shown with, so a note is never lost in silence."
+        note:
+          type: string
+        colour:
+          type: string
+        orphaned:
+          type: boolean
+          description: "Orphaned means the anchor no longer resolves. The mark is kept and shown, never deleted."
+        shared:
+          type: boolean
+          description: "Shared marks somebody else's note, visible because they shared it. The store has always known - it is how a borrowed book can be argued with - but the wire dropped it, so the reader painted another person's highlight as though it were the reader's own and offered to edit it. Shared marks are readable and never editable."
+        author:
+          type: string
+          description: "Author names who wrote it, for a shared mark. Empty for your own."
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+          description: "UpdatedAt is when this server wrote the row - an edit, a sync push, or re-ingest orphaning it. It is not when the change was made; it is when this server heard about it, which is what a sync pull's `since` reads."
+        editedAt:
+          type: string
+          format: date-time
+          description: "EditedAt is when the change actually IN this row was made, by whichever device made it - the value sync's last-write-wins compares. A client reconciling a pulled mark against an edit it made offline and has not pushed yet must compare against THIS, not UpdatedAt: two edits made seconds apart on different devices can arrive at the server hours apart, and UpdatedAt would say the later ARRIVAL won ra…"
+    AnnotationList:
+      type: object
+      description: "AnnotationList is every mark in one book."
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Annotation'
+    Answer:
+      type: object
+      description: "Answer is a question, what was done with it, and what it produced."
+      required: [question, answer, intent, sources, books, retrievalMs, generationMs]
+      properties:
+        question:
+          type: string
+        answer:
+          type: string
+          description: "Answer is empty when no chat model is configured, in which case the sources are the whole result: search with citations."
+        intent:
+          type: string
+          description: "Intent is what the router decided the question was. Shown because it explains why a question returned a reading list rather than an answer."
+        subjects:
+          type: array
+          items:
+            type: string
+        searchedFor:
+          type: array
+          items:
+            type: string
+          description: "SearchedFor is what was actually searched for, which is usually the question and is one entry per side for a comparison. Plural because a comparison is retrieved once per side, and reporting only the first would describe half of what happened."
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/Source'
+        books:
+          type: array
+          items:
+            $ref: '#/components/schemas/AnswerBook'
+          description: "Books answers a question that wanted a reading list rather than a synthesis: \"what should I read about X\". Empty for other intents."
+        model:
+          type: string
+        promptId:
+          type: string
+        retrievalMs:
+          type: integer
+        generationMs:
+          type: integer
+        conversationId:
+          type: string
+          description: "Set when the question was asked inside a conversation."
+        messageId:
+          type: string
+    AnswerBook:
+      type: object
+      description: "AnswerBook is one book in a reading list."
+      required: [workId, title]
+      properties:
+        workId:
+          type: string
+        title:
+          type: string
+        authors:
+          type: array
+          items:
+            type: string
+    AnswerDelta:
+      type: object
+      description: "AnswerDelta is one piece of a streaming answer."
+      required: [text]
+      properties:
+        text:
+          type: string
+    ArchivedBook:
+      type: object
+      description: "ArchivedBook is a book whose owner deleted their account."
+      required: [bookFileId, title, format, leftBy, archivedAt, kept]
+      properties:
+        bookFileId:
+          type: string
+        title:
+          type: string
+        format:
+          type: string
+        leftBy:
+          type: string
+          description: "LeftBy is the name of the account that owned it, kept as text because the account it would point at no longer exists."
+        archivedAt:
+          type: string
+          format: date-time
+        kept:
+          type: boolean
+          description: "Kept is true when the file was moved into Lexarii's archive. False means it is still in the library directory it was scanned from."
+    ArchivedBooks:
+      type: object
+      description: "ArchivedBooks is everything waiting to be claimed."
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ArchivedBook'
+    AskRequest:
+      type: object
+      description: "AskRequest is a question put to the library."
+      required: [question]
+      properties:
+        question:
+          type: string
+        bookFileId:
+          type: string
+          description: "BookFileID pins the question to one book, for asking about what you are reading rather than about everything."
+    AuthOptions:
+      type: object
+      description: "AuthOptions is what the login screen needs to render itself."
+      required: [providers, setupRequired, links, branding]
+      properties:
+        providers:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuthProvider'
+        setupRequired:
+          type: boolean
+          description: "SetupRequired is true when no account exists yet, so the client offers account creation rather than a login form nobody can satisfy."
+        links:
+          type: array
+          items:
+            $ref: '#/components/schemas/SignInLink'
+          description: "Links are the administrator's own links for the sign-in page - how to ask for an account, where to reset a password, the terms of use - from LEXARII_SIGNIN_LINKS. Always present, empty when none are configured."
+        branding:
+          type: boolean
+          description: "Branding is true when the installation serves its own stylesheet at /branding/branding.css, which the client then loads after its own styles. From LEXARII_BRANDING_DIR, or set by an embedder serving /branding/ itself."
+    AuthProvider:
+      type: object
+      description: "AuthProvider is one configured sign-in method."
+      required: [name, displayName, kind]
+      properties:
+        name:
+          type: string
+        displayName:
+          type: string
+        kind:
+          type: string
+          description: "Kind tells the client how to present it: \"password\" renders a form, \"redirect\" renders a button, \"header\" is handled by a proxy."
+    AuthToken:
+      type: object
+      description: "AuthToken is a bearer token and the account it signs in as."
+      required: [token, sessionId, expiresAt, user]
+      properties:
+        token:
+          type: string
+        sessionId:
+          type: string
+          description: "SessionID is the same id the session list shows, so a client can offer to revoke its own session."
+        expiresAt:
+          type: string
+          format: date-time
+        user:
+          $ref: '#/components/schemas/User'
+    Author:
+      type: object
+      description: "Author is a contributor on a work."
+      required: [id, name, sortName, role]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        sortName:
+          type: string
+        role:
+          type: string
+    BlockedFile:
+      type: object
+      description: "BlockedFile is one entry on the blocklist: bytes an administrator removed from the installation, refused if anybody adds them again."
+      required: [contentHash, reason, blockedAt, copiesRemain]
+      properties:
+        contentHash:
+          type: string
+        reason:
+          type: string
+        blockedAt:
+          type: string
+          format: date-time
+        blockedBy:
+          type: string
+          description: "BlockedBy is the administrator who removed it, or absent once their account is gone. The block outlives them."
+        title:
+          type: string
+          description: "Title is the title the file had, while its record lasts. Absent once the record has expired with the archive, when only the hash is left."
+        copiesRemain:
+          type: boolean
+          description: "CopiesRemain is true while some copy Lexarii itself stored of the file may still be on disk: deleting them failed, or has not run yet. Finish with POST /admin/blocked/{hash}/discard. Never about the library directory, which is not deleted from."
+    BlockedFiles:
+      type: object
+      description: "BlockedFiles is the blocklist, most recent first."
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/BlockedFile'
+    BookFile:
+      type: object
+      description: "BookFile is one file backing a work."
+      required: [id, format, sizeBytes, status, missing, path, canDownload]
+      properties:
+        id:
+          type: string
+        format:
+          type: string
+        sizeBytes:
+          type: integer
+        status:
+          type: string
+        ingestError:
+          type: string
+        unitCount:
+          type: integer
+          description: "UnitCount is pages for a PDF, spine items for an EPUB. See UnitType."
+        unitType:
+          type: string
+        missing:
+          type: boolean
+        extractedAt:
+          type: string
+          format: date-time
+        path:
+          type: string
+          description: "Path is the location on the server's disk. Shown so an administrator can find the file; never written to. Empty for anybody who is not an administrator, and for a file the viewer did not scan themselves: one lent to them, or one they uploaded, which carries Filename instead."
+        filename:
+          type: string
+          description: "Filename is the name this viewer gave the file when they added it. Empty for a file they do not hold, or one found by a scan, whose path already says what it is called. Uploads are stored under their content hash, so this is the only place an uploaded file's own name appears, and it is the viewer's: two people can hold one file under different names."
+        held:
+          type: boolean
+          description: "Held says whether this viewer holds the file - added it themselves - as opposed to having it lent to them. Only a holder can take it off their shelf (DELETE /books/{id}/holding). Omitted when false."
+        canDownload:
+          type: boolean
+          description: "CanDownload says whether this viewer may have the file itself. A book can be lent to be read without being handed over, so the download is offered only where it would actually work."
+    BookInfo:
+      type: object
+      description: "BookInfo tells the reader which surface to open before it fetches anything heavy."
+      required: [bookFileId, title, workId, format, sizeBytes, status, reflowable, canDownload]
+      properties:
+        bookFileId:
+          type: string
+        title:
+          type: string
+          description: "Title and WorkID let the reader name the book it is showing and link back to it. Without them the chrome could only count spine items."
+        workId:
+          type: string
+        format:
+          type: string
+        sizeBytes:
+          type: integer
+        status:
+          type: string
+        unitCount:
+          type: integer
+        reflowable:
+          type: boolean
+          description: "Reflowable is true for formats whose text is re-laid-out to the reader's typography. A PDF has fixed pages and is rendered as-is."
+        canDownload:
+          type: boolean
+          description: "CanDownload says whether this person may take the original file. False for a book shared to read, in which case a PDF reader must fetch pages one at a time rather than the whole document."
+    ClaimRequest:
+      type: object
+      description: "ClaimRequest hands an archived book to somebody. An empty owner means the administrator making the request."
+      properties:
+        ownerId:
+          type: string
+    Collection:
+      type: object
+      description: "Collection is a reader's own grouping of their books."
+      required: [id, name, books, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        parentId:
+          type: string
+          description: "ParentID nests one collection inside another. Empty for a top-level one."
+        books:
+          type: integer
+          description: "Books is how many are in it."
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CollectionDetail:
+      type: object
+      description: "CollectionDetail is a collection and the books in it."
+      required: [id, name, books, createdAt, updatedAt, items]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        parentId:
+          type: string
+          description: "ParentID nests one collection inside another. Empty for a top-level one."
+        books:
+          type: integer
+          description: "Books is how many are in it."
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/LibraryItem'
+    CollectionList:
+      type: object
+      description: "CollectionList is every collection a person has made."
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Collection'
+    CollectionRequest:
+      type: object
+      description: "CollectionRequest creates or renames a collection."
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        parentId:
+          type: string
+    ContinueItem:
+      type: object
+      description: "ContinueItem is a book the user has started reading."
+      required: [workId, title, bookFileId, format, lastReadAt]
+      properties:
+        workId:
+          type: string
+        title:
+          type: string
+        bookFileId:
+          type: string
+        format:
+          type: string
+        percent:
+          type: number
+        lastReadAt:
+          type: string
+          format: date-time
+    ContinueList:
+      type: object
+      description: "ContinueList is the \"continue reading\" shelf."
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ContinueItem'
+    Conversation:
+      type: object
+      description: "Conversation is a thread and its turns."
+      required: [id, title, messages, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        bookFileId:
+          type: string
+          description: "BookFileID is set when the thread is pinned to one book."
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/Message'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    ConversationList:
+      type: object
+      description: "ConversationList is a user's threads, most recently used first."
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConversationSummary'
+    ConversationSummary:
+      type: object
+      description: "ConversationSummary is one thread in a list."
+      required: [id, title, updatedAt]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+    CoverTarget:
+      type: object
+      description: "CoverTarget is a file whose cover has not been rendered yet."
+      required: [bookFileId, format]
+      properties:
+        bookFileId:
+          type: string
+        format:
+          type: string
+    CoverTargets:
+      type: object
+      description: "CoverTargets is the work queue for cover rendering."
+      required: [items, remaining]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/CoverTarget'
+        remaining:
+          type: integer
+          description: "Remaining is how many books still have no cover, across the whole library and not just this batch. The client works through 24 at a time, so counting what it was handed would report the same number on every round and read as though nothing were happening."
+    CreateAnnotation:
+      type: object
+      description: "CreateAnnotation makes a new mark."
+      required: [type, start, end]
+      properties:
+        type:
+          type: string
+        start:
+          type: string
+        end:
+          type: string
+        selectedText:
+          type: string
+        note:
+          type: string
+        colour:
+          type: string
+    DeletedMark:
+      type: object
+      description: "DeletedMark says a mark was deleted, so a client that still holds it stops."
+      required: [id, bookFileId, deletedAt]
+      properties:
+        id:
+          type: string
+        bookFileId:
+          type: string
+        deletedAt:
+          type: string
+          format: date-time
+    DiscardedCopies:
+      type: object
+      description: "DiscardedCopies reports whether, after another attempt, any copy Lexarii stored of a removed file may still be on disk."
+      required: [copiesRemain]
+      properties:
+        copiesRemain:
+          type: boolean
+    DuplicateGroup:
+      type: object
+      description: "DuplicateGroup is a set of works that look like one book."
+      required: [reason, works]
+      properties:
+        reason:
+          type: string
+          description: "Reason says what the machine noticed, because merging is destructive enough that somebody deciding should be told why they were asked."
+        works:
+          type: array
+          items:
+            $ref: '#/components/schemas/DuplicateWork'
+    DuplicateList:
+      type: object
+      description: "DuplicateList is every group found."
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/DuplicateGroup'
+    DuplicateWork:
+      type: object
+      description: "DuplicateWork is one candidate, with enough to choose between them."
+      required: [workId, title, files, annotations, hasProgress]
+      properties:
+        workId:
+          type: string
+        title:
+          type: string
+        authors:
+          type: array
+          items:
+            type: string
+        formats:
+          type: array
+          items:
+            type: string
+        files:
+          type: integer
+        annotations:
+          type: integer
+          description: "Annotations and HasProgress say which copy has actually been read. Nothing is lost by merging - marks follow their file - but the copy somebody has read is usually the one they mean to keep."
+        hasProgress:
+          type: boolean
+    Edition:
+      type: object
+      description: "Edition is one printing: a publisher, a year, an ISBN."
+      required: [id]
+      properties:
+        id:
+          type: string
+        isbn13:
+          type: string
+        isbn10:
+          type: string
+        publisher:
+          type: string
+        publishedOn:
+          type: string
+          format: date-time
+          description: "PublishedOn is a date because that is what the column holds, though for almost every book only the year is known and it reads as 1 January."
+        pageCount:
+          type: integer
+        language:
+          type: string
+    EnrichmentStarted:
+      type: object
+      description: "EnrichmentStarted reports what was queued."
+      required: [queued, eligible, promptId, modelConfigured]
+      properties:
+        queued:
+          type: integer
+          description: "Queued counts jobs newly created. Eligible counts books that still need describing, which is larger when some are already queued."
+        eligible:
+          type: integer
+        promptId:
+          type: string
+          description: "PromptID is the prompt these jobs will use. Stored with every result, so a library described by one prompt can be told from one described by the next."
+        modelConfigured:
+          type: boolean
+          description: "ModelConfigured is false when no model is set up at all, which is the difference between \"nothing happened\" and \"switch your model on\"."
+    Error:
+      type: object
+      description: "Error is the single error shape used by every endpoint."
+      required: [error]
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorDetail'
+    ErrorDetail:
+      type: object
+      description: "ErrorDetail is what went wrong."
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: "Code is a stable machine-readable identifier. Clients may branch on it."
+        message:
+          type: string
+          description: "Message is for humans and may change freely."
+        details:
+          type: object
+          additionalProperties:
+          description: "Details carries whatever is specific to this failure."
+    FilesErased:
+      type: object
+      description: "FilesErased reports what erasing a person's books did."
+      required: [filesErased, copiesDeleted, copiesPending, kept, withdrawn]
+      properties:
+        filesErased:
+          type: integer
+          description: "FilesErased is how many books only this person held were erased: their records, what was derived from them, and the copies Lexarii stored."
+        copiesDeleted:
+          type: integer
+          description: "CopiesDeleted is how many stored copies were deleted from disk. A book in the library directory has none: that directory is read-only and never touched."
+        copiesPending:
+          type: integer
+          description: "CopiesPending counts the content hashes of erased books whose stored copies could not be deleted yet - the disk refused, or an upload of the same bytes is on its way. They are deleted later without anybody asking."
+        kept:
+          type: integer
+          description: "Kept counts books only this person holds that somebody else's upload of the same bytes is still waiting for, which were left alone."
+        withdrawn:
+          type: integer
+          description: "Withdrawn counts this person's own uploads that were not extracted yet and were withdrawn: no longer waiting to reach their shelf, a queued extraction cancelled, the stored copy deleted or owed."
+    Health:
+      type: object
+      description: "Health is the answer to the open health endpoint."
+      required: [status]
+      properties:
+        status:
+          type: string
+          description: "Status is ok, degraded, or down. Degraded still answers 200: the library and reader work with no model at all. Down answers 503."
+        version:
+          type: string
+          description: "Version is the build. Administrators only."
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+          description: "Checks is one line per dependency, keyed by name. Administrators only."
+        degraded:
+          type: array
+          items:
+            type: string
+          description: "Degraded names the optional dependencies that are down. Administrators only."
+    ImportMarks:
+      type: object
+      description: "ImportMarks is a whole book's worth of them."
+      required: [marks]
+      properties:
+        marks:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImportedMark'
+    ImportResult:
+      type: object
+      description: "ImportResult says how many were kept."
+      required: [imported, offered]
+      properties:
+        imported:
+          type: integer
+          description: "Imported is how many were stored. Offered is how many were sent: a rectangle over a picture has no words under it and is not a mark anybody could be shown again."
+        offered:
+          type: integer
+    ImportedMark:
+      type: object
+      description: "ImportedMark is one highlight read out of a book's own file by the client."
+      required: [page, occurrence, text]
+      properties:
+        page:
+          type: integer
+          description: "Page is the physical page, 1-based."
+        occurrence:
+          type: integer
+          description: "Occurrence disambiguates a phrase that appears more than once on the page, as a mark made in the reader does."
+        text:
+          type: string
+        note:
+          type: string
+          description: "Note is whatever the other reader stored with it, usually nothing."
+    IndexingStarted:
+      type: object
+      description: "IndexingStarted reports what was queued and how much of the library is searchable."
+      required: [queued, eligible, strategyVersion, files, indexedFiles, chunks, embeddedChunks, modelConfigured]
+      properties:
+        queued:
+          type: integer
+        eligible:
+          type: integer
+        strategyVersion:
+          type: integer
+          description: "StrategyVersion is how these chunks are being made. Changing it makes every existing chunk stale rather than silently mixed with new ones."
+        files:
+          type: integer
+          description: "Files is every book with a text layer; IndexedFiles is how many have passages; EmbeddedChunks is how many of those can be searched by meaning."
+        indexedFiles:
+          type: integer
+        chunks:
+          type: integer
+        embeddedChunks:
+          type: integer
+        modelConfigured:
+          type: boolean
+          description: "ModelConfigured is false when no embedding model is set up, which is the difference between \"nothing happened\" and \"switch your model on\"."
+    Job:
+      type: object
+      description: "Job is the state of one background job."
+      required: [id, type, status, progress, attempts, maxAttempts, createdAt]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        status:
+          type: string
+        progress:
+          type: number
+        progressNote:
+          type: string
+        attempts:
+          type: integer
+        maxAttempts:
+          type: integer
+        lastError:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        runAfter:
+          type: string
+          format: date-time
+    JobAccepted:
+      type: object
+      description: "JobAccepted is the response to a request that starts background work."
+      required: [jobId, created]
+      properties:
+        jobId:
+          type: string
+        created:
+          type: boolean
+          description: "Created is false when an equivalent job was already queued, in which case JobID names that one. Asking twice is not an error."
+    LibraryItem:
+      type: object
+      description: "LibraryItem is one card in the library grid."
+      required: [workId, title, authors, formats, status, missing, bookFileId, addedAt, canDownload]
+      properties:
+        workId:
+          type: string
+        title:
+          type: string
+        subtitle:
+          type: string
+        authors:
+          type: array
+          items:
+            type: string
+        series:
+          type: string
+        seriesIndex:
+          type: number
+        formats:
+          type: array
+          items:
+            type: string
+        tags:
+          type: array
+          items:
+            type: string
+        coverUrl:
+          type: string
+        unitCount:
+          type: integer
+          description: "UnitCount is pages for a PDF and spine items for an EPUB. These are not the same thing - an EPUB with 104 spine items is a book of several hundred pages - so UnitType says which, and the UI must not label either \"pages\" unconditionally."
+        unitType:
+          type: string
+        status:
+          type: string
+        missing:
+          type: boolean
+          description: "Missing means the file is absent from disk - an unmounted drive or a deletion. The row is kept so annotations and reading position survive."
+        bookFileId:
+          type: string
+        addedAt:
+          type: string
+          format: date-time
+        progress:
+          type: number
+          description: "Progress is how far this reader has got, 0 to 1, absent if they have not opened it. The furthest point reached rather than the current position: a shelf should say how much of a book has been read, not where someone happens to be after turning back to check something."
+        lentBy:
+          type: string
+          description: "LentBy names whoever owns this book, when that is not the person looking at it. Absent for your own books, which is nearly all of them."
+        canDownload:
+          type: boolean
+          description: "CanDownload is false for a book shared to be read rather than kept. The shelf uses it to say so before somebody goes looking for a download that is not there."
+    LibraryPage:
+      type: object
+      description: "LibraryPage is a page of library items."
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/LibraryItem'
+        nextCursor:
+          type: string
+          description: "NextCursor is empty when there are no further pages."
+    LoginRequest:
+      type: object
+      description: "LoginRequest signs in with a password provider."
+      required: [username, password]
+      properties:
+        provider:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+    MarkResult:
+      type: object
+      description: "MarkResult is the fate of one pushed mark."
+      required: [id, status]
+      properties:
+        id:
+          type: string
+        status:
+          type: string
+          description: "Status is \"applied\", \"stale\" - the server held a newer version, which arrives on the next pull - or \"refused\", for a book this person cannot open."
+    Mention:
+      type: object
+      description: "Mention is one book in this library naming another in its own text."
+      required: [workId, bookFileId, title, authors, locator, excerpt, places]
+      properties:
+        workId:
+          type: string
+          description: "WorkID is the book doing the naming."
+        bookFileId:
+          type: string
+        title:
+          type: string
+        authors:
+          type: array
+          items:
+            type: string
+        locator:
+          type: string
+          description: "Locator opens the reader where the name appears."
+        excerpt:
+          type: string
+        places:
+          type: integer
+          description: "Places is how many passages of that book name this one."
+    MentionList:
+      type: object
+      description: "MentionList is every book found naming this one."
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Mention'
+    MergeResult:
+      type: object
+      description: "MergeResult reports what moved."
+      required: [kept, filesMoved]
+      properties:
+        kept:
+          type: string
+        filesMoved:
+          type: integer
+          description: "FilesMoved counts the editions repointed, which is how many separate copies the kept book now holds."
+    MergeWorks:
+      type: object
+      description: "MergeWorks names the books to fold into the one in the path."
+      required: [merge]
+      properties:
+        merge:
+          type: array
+          items:
+            type: string
+    Message:
+      type: object
+      description: "Message is one turn in a conversation."
+      required: [id, seq, role, content, citations, createdAt]
+      properties:
+        id:
+          type: string
+        seq:
+          type: integer
+        role:
+          type: string
+        content:
+          type: string
+        intent:
+          type: string
+          description: "How the answer was produced, so a disappointing one can be diagnosed rather than guessed at."
+        model:
+          type: string
+        retrievalMs:
+          type: integer
+        generationMs:
+          type: integer
+        unsupported:
+          type: boolean
+          description: "Unsupported marks an answer given with no passages behind it."
+        citations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Source'
+        createdAt:
+          type: string
+          format: date-time
+    NoteShareByUsername:
+      type: object
+      description: "NoteShareByUsername shares the caller's own marks on a book with the account with this username."
+      required: [username]
+      properties:
+        username:
+          type: string
+    NoteShareList:
+      type: object
+      description: "NoteShareList is who someone shares their own marks on a book with."
+      required: [items, people]
+      properties:
+        items:
+          type: array
+          items:
+            type: string
+        people:
+          type: array
+          items:
+            $ref: '#/components/schemas/Recipient'
+    OrphanAnnotations:
+      type: object
+      description: "OrphanAnnotations reports what the reader found when it tried to resolve a chapter's anchors."
+      required: [ids]
+      properties:
+        ids:
+          type: array
+          items:
+            type: string
+        resolved:
+          type: array
+          items:
+            type: string
+          description: "Resolved lists marks whose anchors were found, so a stale flag clears."
+    OrphanResult:
+      type: object
+      description: "OrphanResult reports how many marks were flagged."
+      required: [orphaned]
+      properties:
+        orphaned:
+          type: integer
+    Person:
+      type: object
+      description: "Person is an account a book can be shared with."
+      required: [id, username, isAdmin]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        isAdmin:
+          type: boolean
+    PersonList:
+      type: object
+      description: "PersonList is who a book can be shared with."
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Person'
+    PushedMark:
+      type: object
+      description: "PushedMark is one mark a client made, changed, or deleted offline."
+      required: [id, bookFileId, updatedAt]
+      properties:
+        id:
+          type: string
+          description: "ID is generated by the CLIENT, before any server has seen the mark. It is what makes pushing the same change twice harmless, which matters because the connection that drops is the one carrying the response."
+        bookFileId:
+          type: string
+        type:
+          type: string
+        start:
+          type: string
+        end:
+          type: string
+        selectedText:
+          type: string
+        note:
+          type: string
+        colour:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+          description: "UpdatedAt is when the CLIENT made this change, and decides which version wins against the server's. Not when it was sent: a phone that was in a tunnel for a week did not edit anything at the moment it found signal."
+        deleted:
+          type: boolean
+          description: "Deleted says this change is a deletion, which carries nothing else."
+    PushedPosition:
+      type: object
+      description: "PushedPosition is where a client says a book was left."
+      required: [bookFileId, position, readAt]
+      properties:
+        bookFileId:
+          type: string
+        position:
+          type: string
+        percent:
+          type: number
+        readAt:
+          type: string
+          format: date-time
+          description: "ReadAt is when the reader was at this position, by the client's clock."
+    ReaderManifest:
+      type: object
+      description: "ReaderManifest is everything the reader needs before it opens a book."
+      required: [bookFileId, format, spine, toc]
+      properties:
+        bookFileId:
+          type: string
+        format:
+          type: string
+        spine:
+          type: array
+          items:
+            $ref: '#/components/schemas/SpineItem'
+        toc:
+          type: array
+          items:
+            $ref: '#/components/schemas/TOCEntry'
+    ReadingProgress:
+      type: object
+      description: "ReadingProgress is where a user has read to in one file."
+      required: [bookFileId, started]
+      properties:
+        bookFileId:
+          type: string
+        started:
+          type: boolean
+          description: "Started is false when the book has never been opened, which is not an error and must not be treated as one."
+        locator:
+          type: string
+          description: "Locator is the canonical position string, and is where the reader reopens. It is independent of font size, viewport, and device: a percentage would survive none of those."
+        percent:
+          type: number
+          description: "Percent renders Locator. Display only, never used to restore a position."
+        furthestLocator:
+          type: string
+          description: "FurthestLocator is the deepest position reached, which may be ahead of Locator when the reader has turned back. It is what a \"how far through am I?\" figure is measured from, and it never moves backwards."
+        furthestPercent:
+          type: number
+        lastReadAt:
+          type: string
+          format: date-time
+    RecentAnnotation:
+      type: object
+      description: "RecentAnnotation is a mark alongside the book it belongs to."
+      required: [annotation, bookFileId, workId, title, format]
+      properties:
+        annotation:
+          $ref: '#/components/schemas/Annotation'
+        bookFileId:
+          type: string
+        workId:
+          type: string
+        title:
+          type: string
+        format:
+          type: string
+    RecentAnnotationList:
+      type: object
+      description: "RecentAnnotationList is the notes view across the whole library."
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecentAnnotation'
+        nextCursor:
+          type: string
+          description: "NextCursor continues the list from the last item; empty on the last page."
+    Recipient:
+      type: object
+      description: "Recipient is somebody a book or notes are shared with: an id to change or end the share by, and the name to show."
+      required: [id, username]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+    RemoveForEveryoneRequest:
+      type: object
+      description: "RemoveForEveryoneRequest takes a book file off the installation for everybody and blocks its bytes from coming back."
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          description: "Reason is recorded on the blocklist, for administrators. Required; at most 1000 characters (and 4000 bytes)."
+        purgeQuotes:
+          type: boolean
+          description: "PurgeQuotes also erases the file's words kept outside it: the text each highlight on it quotes, and the excerpt each chat citation of it keeps. The highlights, notes and citations themselves stay. Default false."
+    RemovedForEveryone:
+      type: object
+      description: "RemovedForEveryone reports how many people's shelves the file left: its holders, and anybody whose upload of it was still waiting to be extracted. A count, not a list: who held a file is each of them's own business."
+      required: [removedFor]
+      properties:
+        removedFor:
+          type: integer
+    SaveProgress:
+      type: object
+      description: "SaveProgress is the request body for recording a position."
+      required: [locator]
+      properties:
+        locator:
+          type: string
+        percent:
+          type: number
+    Session:
+      type: object
+      description: "Session is one live sign-in, as shown to the person who owns it."
+      required: [id, current, createdAt, lastUsedAt, expiresAt]
+      properties:
+        id:
+          type: string
+        current:
+          type: boolean
+          description: "Current marks the session making this request, so a person can tell which row is the device in their hand before revoking one of the others."
+        userAgent:
+          type: string
+          description: "UserAgent is the browser's own claim about itself. It is not verified and is shown only as a hint for recognising a device."
+        clientIp:
+          type: string
+          description: "ClientIP is the socket address the session was created from."
+        provider:
+          type: string
+          description: "Provider is how this session was authenticated: local, oidc, ldap, proxy."
+        device:
+          type: string
+          description: "Device is set when this session is a bearer token held by a native client, and names it. Empty means a browser session in a cookie."
+        createdAt:
+          type: string
+          format: date-time
+        lastUsedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+    SessionList:
+      type: object
+      description: "SessionList is every session that can still be used."
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Session'
+    SetupRequest:
+      type: object
+      description: "SetupRequest creates the first account."
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        email:
+          type: string
+        password:
+          type: string
+    Share:
+      type: object
+      description: "Share is one person's access to one book."
+      required: [userId, username, canDownload, annotations]
+      properties:
+        userId:
+          type: string
+        username:
+          type: string
+        canDownload:
+          type: boolean
+          description: "CanDownload allows taking the original file rather than only reading it."
+        annotations:
+          type: boolean
+          description: "Annotations is true when the owner's highlights and notes travel with it."
+    ShareActivity:
+      type: object
+      description: "ShareActivity is one person's reading of one lent book on one day, named so the owner can tell which book it was without looking it up."
+      required: [bookFileId, workId, workTitle, userId, username, day, kind, views, units, of, notable, firstAt, lastAt]
+      properties:
+        bookFileId:
+          type: string
+        workId:
+          type: string
+        workTitle:
+          type: string
+        userId:
+          type: string
+        username:
+          type: string
+        day:
+          type: string
+        kind:
+          type: string
+        views:
+          type: integer
+        units:
+          type: integer
+        of:
+          type: integer
+        notable:
+          type: boolean
+          description: "Notable marks reading worth interrupting somebody for: most of a book in one day, or a whole-file download."
+        firstAt:
+          type: string
+          format: date-time
+        lastAt:
+          type: string
+          format: date-time
+    ShareByUsername:
+      type: object
+      description: "ShareByUsername lends a book to the account with this username, for an installation that does not list its people to everybody. The name is matched without regard to case; the reply is the Share made, carrying the account's id for changing or ending it later."
+      required: [username, canDownload, annotations]
+      properties:
+        username:
+          type: string
+        canDownload:
+          type: boolean
+        annotations:
+          type: boolean
+    ShareList:
+      type: object
+      description: "ShareList is everyone a book is shared with."
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Share'
+    ShareRequest:
+      type: object
+      description: "ShareRequest sets one person's access to one book."
+      required: [canDownload, annotations]
+      properties:
+        canDownload:
+          type: boolean
+        annotations:
+          type: boolean
+    SharingActivity:
+      type: object
+      description: "SharingActivity is what has happened lately to the books this person lent."
+      required: [items, notable, since]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ShareActivity'
+        notable:
+          type: integer
+          description: "Notable counts the items worth acting on, so a client can decide whether to say anything without re-deriving the rule."
+        since:
+          type: string
+          format: date-time
+          description: "Since is the start of the window these items cover."
+    SignInLink:
+      type: object
+      description: "SignInLink is one link shown on the sign-in page."
+      required: [label, href]
+      properties:
+        label:
+          type: string
+        href:
+          type: string
+          description: "Href is a path on this server, beginning with a single \"/\", or an https:// URL. Nothing else is accepted when the server starts."
+    Source:
+      type: object
+      description: "Source is one passage an answer was built from."
+      required: [number, cited, workId, bookFileId, title, label, locator, excerpt, score]
+      properties:
+        number:
+          type: integer
+          description: "Number is the citation marker in the answer: [1], [2]."
+        cited:
+          type: boolean
+          description: "Cited is false for a passage that was retrieved but not referred to. It is still shown, because it is part of why the answer says what it says."
+        workId:
+          type: string
+        bookFileId:
+          type: string
+        title:
+          type: string
+        label:
+          type: string
+          description: "Label is the readable source: the book, the chapter, the page."
+        chapter:
+          type: string
+        locator:
+          type: string
+          description: "Locator opens the reader at this passage."
+        excerpt:
+          type: string
+        score:
+          type: number
+        foundBy:
+          type: string
+          description: "FoundBy is \"meaning\", \"keyword\", or \"both\" - which arm of the search found this passage. Useful when an answer is wrong."
+        kind:
+          type: string
+          description: "Kind is \"passage\" or \"note\". A note is something the reader wrote in the margin of one of these books, and showing it as though the book had said it would misattribute their own opinion to an author."
+    SpineContent:
+      type: object
+      description: "SpineContent is one document, sanitised and ready to insert into the DOM."
+      required: [index, html]
+      properties:
+        index:
+          type: integer
+        html:
+          type: string
+          description: "HTML is a fragment, not a document: the reader supplies the page and the typography. The book's own stylesheet is deliberately not included."
+    SpineItem:
+      type: object
+      description: "SpineItem is one document in reading order."
+      required: [index, linear]
+      properties:
+        index:
+          type: integer
+        id:
+          type: string
+        linear:
+          type: boolean
+          description: "Linear is false for supplementary content a reader may skip. It keeps its index regardless, because dropping it would renumber every locator after it."
+    StartEnrichment:
+      type: object
+      description: "StartEnrichment optionally bounds one enrichment run."
+      properties:
+        limit:
+          type: integer
+    Stats:
+      type: object
+      description: "Stats summarises the library."
+      required: [works, files, authors, tags, pages, missing, needsOcr, failed, byFormat, queueBusy]
+      properties:
+        works:
+          type: integer
+        files:
+          type: integer
+        authors:
+          type: integer
+        tags:
+          type: integer
+        pages:
+          type: integer
+        missing:
+          type: integer
+        needsOcr:
+          type: integer
+        failed:
+          type: integer
+        byFormat:
+          type: object
+          additionalProperties:
+            type: integer
+        queueBusy:
+          type: integer
+          description: "QueueBusy is the number of pending and running jobs. Non-zero means the library is still filling up."
+    Subject:
+      type: object
+      description: "Subject is one thing a library is about, and how much of it."
+      required: [name, slug, books]
+      properties:
+        name:
+          type: string
+        slug:
+          type: string
+          description: "Slug is what the shelf filters on: /?tag=<slug>."
+        books:
+          type: integer
+    SubjectList:
+      type: object
+      description: "SubjectList is everything this person's library is about, commonest first."
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Subject'
+    Suggestion:
+      type: object
+      description: "Suggestion is something a model proposed, awaiting a person's decision."
+      required: [id, workId, workTitle, field, value, generatedAt]
+      properties:
+        id:
+          type: string
+        workId:
+          type: string
+        workTitle:
+          type: string
+        field:
+          type: string
+          description: "Field is what is being proposed: title, summary, series, subjects, audience."
+        value:
+          description: "Value is the proposal itself, shaped by the field."
+        current:
+          type: string
+          description: "Current is what the work holds now, so the two can be compared. Empty when the field has no value, which is the case the proposal fills."
+        model:
+          type: string
+          description: "Model and PromptID are the provenance: which model, on which prompt. Shown to the user, because \"the AI said so\" is not a reason on its own."
+        promptId:
+          type: string
+        confidence:
+          type: number
+        generatedAt:
+          type: string
+          format: date-time
+    SuggestionList:
+      type: object
+      description: "SuggestionList is everything awaiting review."
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Suggestion'
+    SyncPosition:
+      type: object
+      description: "SyncPosition is where a book was left, in both senses."
+      required: [bookFileId, position, furthest, readAt, updatedAt]
+      properties:
+        bookFileId:
+          type: string
+        position:
+          type: string
+          description: "Position is where the reader is, which moves in both directions."
+        furthest:
+          type: string
+          description: "Furthest is how far they have got, which only ever advances."
+        percent:
+          type: number
+        furthestPercent:
+          type: number
+        readAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    SyncPull:
+      type: object
+      description: "SyncPull is everything that changed for one reader since a moment."
+      required: [until, more, annotations, deleted, positions]
+      properties:
+        until:
+          type: string
+          format: date-time
+          description: "Until is the SERVER's clock at the moment of THIS read. Store it as the next `since` only once More comes back false and the round is done - while paging with Cursor, every page's Until is a different, earlier moment and none of them are the right one to keep. Never the client's own clock: two clocks a minute apart would silently lose or repeat a minute of somebody's reading."
+        more:
+          type: boolean
+          description: "More says a page was filled and the rest is waiting. A client must page through with Cursor - not by resending the same `since` - before using Until, or it will skip what it did not receive."
+        cursor:
+          type: string
+          description: "Cursor resumes exactly where this page left off. Present whenever More is true; send it back as the `cursor` query parameter on the next call. Opaque - a client only ever echoes what it was given, never builds one."
+        annotations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Annotation'
+        deleted:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeletedMark'
+          description: "Deleted is the marks that are gone. A deletion cannot be inferred from an absence, so it is stated."
+        positions:
+          type: array
+          items:
+            $ref: '#/components/schemas/SyncPosition'
+    SyncPush:
+      type: object
+      description: "SyncPush is what a client did while it was away."
+      properties:
+        annotations:
+          type: array
+          items:
+            $ref: '#/components/schemas/PushedMark'
+        positions:
+          type: array
+          items:
+            $ref: '#/components/schemas/PushedPosition'
+    SyncPushResult:
+      type: object
+      description: "SyncPushResult says what became of each pushed change."
+      required: [marks]
+      properties:
+        marks:
+          type: array
+          items:
+            $ref: '#/components/schemas/MarkResult'
+    TOCEntry:
+      type: object
+      description: "TOCEntry is one navigation point."
+      required: [title, spineIndex]
+      properties:
+        title:
+          type: string
+        spineIndex:
+          type: integer
+          description: "SpineIndex is where the entry points: the spine index for EPUB, the PAGE for PDF - the same thing `major` means in a locator for each format."
+        fragment:
+          type: string
+        children:
+          type: array
+          items:
+            $ref: '#/components/schemas/TOCEntry'
+    Tag:
+      type: object
+      description: "Tag is a label on a work."
+      required: [id, name, slug, isSubject]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        slug:
+          type: string
+        isSubject:
+          type: boolean
+        source:
+          type: string
+          description: "Source says where the tag came from, so the UI can mark machine-generated tags and let the user reject them."
+    TokenRequest:
+      type: object
+      description: "TokenRequest asks for a bearer token for a client that is not a browser."
+      required: [username, password, device]
+      properties:
+        provider:
+          type: string
+        username:
+          type: string
+        password:
+          type: string
+        device:
+          type: string
+          description: "Device names the thing the token is for - \"Adam's phone\" - and is required. It is how this token is recognised in the session list and revoked, months later, from a device that is no longer to hand."
+    UpdateAnnotation:
+      type: object
+      description: "UpdateAnnotation edits a mark's note or colour. The anchor is deliberately not editable: moving a highlight to different text is a different highlight."
+      required: [note]
+      properties:
+        note:
+          type: string
+        colour:
+          type: string
+    UpdateWork:
+      type: object
+      description: "UpdateWork is a correction somebody made by hand."
+      properties:
+        title:
+          type: string
+        subtitle:
+          type: string
+        series:
+          type: string
+        seriesIndex:
+          type: number
+        language:
+          type: string
+        description:
+          type: string
+        authors:
+          type: array
+          items:
+            type: string
+          description: "Authors replaces the whole list, in order. Replacing rather than adding is the point: a book credited to a download site needs that name gone."
+        publisher:
+          type: string
+        year:
+          type: integer
+          description: "Year is the year of publication. Zero clears it."
+        isbn13:
+          type: string
+        isbn10:
+          type: string
+    UploadResult:
+      type: object
+      description: "UploadResult is the response to a bulk upload."
+      required: [files, summary]
+      properties:
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/UploadedFile'
+        summary:
+          $ref: '#/components/schemas/UploadSummary'
+        interrupted:
+          type: boolean
+          description: "Interrupted is true when the request ended before every part was read. The listed files are still stored."
+        message:
+          type: string
+    UploadStatus:
+      type: string
+      enum: [stored, duplicate, rejected]
+      description: "UploadStatus is the outcome of one uploaded file."
+    UploadSummary:
+      type: object
+      description: "UploadSummary counts the outcomes."
+      required: [stored, duplicate, rejected]
+      properties:
+        stored:
+          type: integer
+        duplicate:
+          type: integer
+        rejected:
+          type: integer
+    UploadedFile:
+      type: object
+      description: "UploadedFile is the per-file outcome of a bulk upload."
+      required: [filename, status]
+      properties:
+        filename:
+          type: string
+        status:
+          $ref: '#/components/schemas/UploadStatus'
+        contentHash:
+          type: string
+        format:
+          type: string
+        sizeBytes:
+          type: integer
+        jobId:
+          type: string
+          description: "JobID names the extraction job, when one was queued."
+        error:
+          type: string
+        code:
+          type: string
+          description: "Code says why a rejected file was rejected, when a client may want to branch on it: \"content_blocked\" for bytes an administrator has removed from the installation. Empty otherwise."
+        note:
+          type: string
+    User:
+      type: object
+      description: "User is the signed-in account."
+      required: [id, username, isAdmin, createdAt]
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        email:
+          type: string
+        isAdmin:
+          type: boolean
+        canUpload:
+          type: boolean
+          description: "CanUpload says whether this person may add books by uploading them: administrators always, everybody else when the installation's upload policy allows it. The server decides either way; this is so a client offers the button only where pressing it would work. Omitted when false, so a client built against this field still reads an older server."
+        canAsk:
+          type: boolean
+          description: "CanAsk says whether asking the library can work here: a chat model is configured. Without one every question fails, so a client hides its Ask entry points rather than offering a box that cannot answer. It says nothing about whether the model is up right now - that changes by the minute, and an answer that fails says so. Omitted when false."
+        canListPeople:
+          type: boolean
+          description: "CanListPeople says whether GET /people lists every account for this person: always for an administrator, and for everybody else unless the installation keeps its people unlisted (LEXARII_PEOPLE_DIRECTORY=none), when a client asks for a recipient's username instead of offering a list. Omitted when false."
+        createdAt:
+          type: string
+          format: date-time
+    WorkDetail:
+      type: object
+      description: "WorkDetail is the book detail page."
+      required: [id, title, sortTitle, authors, files, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        subtitle:
+          type: string
+        sortTitle:
+          type: string
+        series:
+          type: string
+        seriesIndex:
+          type: number
+        language:
+          type: string
+        description:
+          type: string
+        summary:
+          type: string
+        authors:
+          type: array
+          items:
+            $ref: '#/components/schemas/Author'
+        editions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Edition'
+          description: "Editions carry the publisher, the year and the ISBNs. Written at ingest and, until this page could be corrected, never sent to the client at all - so a book's page showed a title and an author while the record held the rest."
+        files:
+          type: array
+          items:
+            $ref: '#/components/schemas/BookFile'
+        tags:
+          type: array
+          items:
+            $ref: '#/components/schemas/Tag'
+        warnings:
+          type: array
+          items:
+            type: string
+          description: "Warnings are recoverable problems found while parsing: a missing cover, an unreadable TOC, an ignored producer artefact."
+        provenance:
+          type: object
+          additionalProperties:
+            type: string
+          description: "Provenance maps a field name to where its value came from: embedded, user, llm, filename, external. The UI uses this to show what was guessed."
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: lexarii_session
+      description: |
+        Set by /auth/login, /auth/setup, or a federated callback. Every endpoint
+        requires it except /health and the /auth endpoints that establish it.
+        This is how a BROWSER authenticates: the cookie is HttpOnly, so no
+        script on the page can read the token.
+    bearerToken:
+      type: http
+      scheme: bearer
+      description: |
+        How a client that is not a browser authenticates. /auth/token returns
+        a token, the client stores it and sends it as an Authorization header
+        of the form "Bearer <token>" on every request.
+
+        It is the same kind of token against the same sessions as the cookie -
+        one scheme with two ways of carrying it, not two authentication
+        systems - so a token can be listed and revoked beside browser sessions.
+        When a request carries both, the header wins: a header is a deliberate
+        act by the caller and a cookie is attached by the browser whether or
+        not anybody meant it.
+
+  responses:
+    NotFound:
+      description: No such resource
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unauthorized:
+      description: Not signed in
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: |
+        Signed in, but not allowed. Returned with the error code not_an_admin
+        by the endpoints that change the shared library.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    BadRequest:
+      description: The request was malformed or failed validation
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'

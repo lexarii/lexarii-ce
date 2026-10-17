@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# DRAFT metadata for a future merge request to fdroiddata
+# (https://gitlab.com/fdroid/fdroiddata). NOT submitted. Kept here, next to
+# the app it describes, so it stays honest about what is and is not ready -
+# see docs/android-release.md for the checklist this depends on.
+#
+# Once ready, this file is renamed to metadata/com.lexarii.app.yml
+# in a checkout of fdroiddata itself and opened as a merge request there;
+# fdroiddata does not read it from this repository.
+
+Categories:
+  - Ebook Reader
+
+License: AGPL-3.0-or-later
+
+AuthorName: Adam Poniatowski
+AuthorEmail: adaml.poniatowski@gmail.com
+
+# BLOCKER: the GitHub mirror (scripts/mirror.sh, the `mirror` job in
+# .forgejo/workflows/ci.yml) is written but not live - see docs/ROADMAP.md M5
+# and docs/android-release.md. fdroiddata's build servers need a URL they can
+# clone without a Forgejo account, so scm.poniatowski.dev (which requires
+# sign-in for anonymous clone in its current configuration) cannot be the
+# `Repo:` below until the mirror is pushing. The URL here is a clearly marked
+# placeholder - the mirror's repository name is "lexarii"; the owner/org is
+# not yet decided.
+SourceCode: https://github.com/PLACEHOLDER-org/lexarii
+IssueTracker: https://github.com/PLACEHOLDER-org/lexarii/issues
+
+RepoType: git
+Repo: https://github.com/PLACEHOLDER-org/lexarii.git
+
+# Talks only to the server address the person signing in provides - their own
+# Lexarii instance, self-hosted, never a service this project operates.
+# None of the standard AntiFeatures apply:
+#   - NonFreeNet doesn't fit: that flag is for an app that NEEDS a
+#     proprietary or vendor-run network service to be useful. The server
+#     this app needs is free software (this same repository) that the user
+#     runs themselves; nothing in the protocol favours a proprietary
+#     implementation, and the app doesn't (and can't) know if the server it
+#     is pointed at is anything but Lexarii's own.
+#   - No ads, no tracking, no non-free assets, no non-free dependency (see
+#     LICENSES-deps.md), no known vulnerabilities, nothing upstream-non-free.
+AntiFeatures: {}
+
+Builds:
+  - versionName: 0.1.0
+    versionCode: 1000
+    # The tag this build is cut from - see the versioning scheme in
+    # docs/android-release.md. `android-v0.1.0` does not exist yet; this whole
+    # Build entry is aspirational until it is tagged and the mirror above is
+    # real. Do not open the fdroiddata merge request before both are true.
+    commit: android-v0.1.0
+    subdir: android/app
+    gradle:
+      - yes
+    # No `sudo:` block: fdroidserver's standard build image already carries
+    # multiple JDKs and the Android SDK components this build needs
+    # (compileSdk 35, matching build-tools). Add one only if a real build on
+    # F-Droid's infrastructure says otherwise - guessing preemptively here
+    # would be exactly the kind of untested assumption this file exists to
+    # avoid.
+    output: app/build/outputs/apk/release/app-release-unsigned.apk
+
+# Tags, not Version: this project's tags are the whole point of the
+# versioning scheme in docs/android-release.md - versionCode is a pure
+# function of the tag name, so fdroidserver can compute it itself rather
+# than trusting a number this file asserts. The pattern picks out
+# android-vX.Y.Z and ignores the server's own vX.Y.Z tags in the same repo.
+AutoUpdateMode: Version
+UpdateCheckMode: Tags ^android-v([0-9]+\.[0-9]+\.[0-9]+)$
+
+CurrentVersion: 0.1.0
+CurrentVersionCode: 1000

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<resources>
+    <!-- The window behind Compose, seen for the moment before the first frame.
+         Light here and dark in values-night, so that moment matches the
+         screen that follows it instead of flashing the opposite. -->
+    <style name="Theme.Lexarii" parent="android:Theme.Material.Light.NoActionBar" />
+</resources>

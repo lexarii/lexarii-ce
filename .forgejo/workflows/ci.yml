@@ -1,0 +1,470 @@
+# Forgejo Actions (GitHub Actions-compatible syntax), kept portable so the
+# GitHub mirror can run it unchanged.
+#
+# Every job names its container image explicitly rather than letting the label
+# decide. The first run of this workflow failed three jobs in one second each:
+#
+#   Error response from daemon: failed to resolve reference
+#   "code.forgejo.org/oci/catthehacker/ubuntu:act-22.04": not found
+#
+# The runner's label map pointed `ubuntu-latest` at an image that does not
+# exist at that path - code.forgejo.org/oci hosts node, debian and alpine, and
+# no catthehacker mirror. Naming the image here means a workflow that runs the
+# same way on any runner, rather than one that depends on how each was set up.
+# catthehacker/ubuntu:act-22.04 on Docker Hub is what that label was reaching
+# for, and the runner can reach Docker Hub: it pulled pgvector from there in
+# the same failed run.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    # The only label this server's runner advertises. `ubuntu-latest` matched
+    # until the runner was re-registered, and every job since has sat unpicked -
+    # not failing, simply never starting.
+    #
+    # self-hosted is the one to switch to when a host-mode runner exists again;
+    # it is what the image job wants, because a job in a container has no Docker
+    # of its own.
+    # runs-on: self-hosted
+    runs-on: docker
+    container:
+      image: catthehacker/ubuntu:act-22.04
+    services:
+      postgres:
+        image: pgvector/pgvector:pg18
+        # No password: this database lives for one job, holds nothing but
+        # test rows, and a password written here would be public anyway.
+        # trust says that plainly instead of pretending otherwise.
+        env:
+          POSTGRES_USER: lexarii
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: lexarii
+        options: >-
+          --health-cmd "pg_isready -U lexarii"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+        # Published as well as networked, because which of the two works
+        # depends on how the runner is set up - see "find the database" below.
+        ports: ['5432:5432']
+    steps:
+      - uses: actions/checkout@v4
+
+      # Where a service container lives depends on the runner, and getting it
+      # wrong fails four steps later with a DNS error.
+      #
+      # On GitHub, a job in a container reaches a service by its name on a
+      # shared network. This runner puts the job on a network - the failure was
+      # `lookup postgres on 127.0.0.11`, which is Docker's own resolver - but
+      # does not register the service under that name on it. A job running
+      # directly on the host instead wants localhost and the published port.
+      #
+      # Rather than encode one runner's arrangement, try each and use whichever
+      # answers. Plain bash: /dev/tcp needs nothing installed, and the
+      # migration immediately afterwards is what proves it is really Postgres.
+      # TEST_DATABASE_URL names a SEPARATE database from DATABASE_URL. The
+      # store tests truncate shared tables in setup, so pointing them at the
+      # working database destroys whatever is in it. They skip themselves when
+      # it is unset, so `go test ./...` stays runnable on a laptop with no
+      # database at all.
+      - name: find the database
+        run: |
+          for host in postgres localhost host.docker.internal 172.17.0.1; do
+            for _ in $(seq 30); do
+              if (echo > /dev/tcp/"$host"/5432) 2>/dev/null; then
+                echo "database answering at $host"
+                echo "PGHOST=$host" >> "$GITHUB_ENV"
+                echo "DATABASE_URL=postgres://lexarii@$host:5432/lexarii?sslmode=disable" >> "$GITHUB_ENV"
+                echo "TEST_DATABASE_URL=postgres://lexarii@$host:5432/lexarii_test?sslmode=disable" >> "$GITHUB_ENV"
+                exit 0
+              fi
+              sleep 1
+            done
+            echo "not at $host"
+          done
+          echo "::error::Postgres is not reachable as postgres, localhost, host.docker.internal or 172.17.0.1."
+          echo "::error::The service container is running but this job cannot see it - a runner networking setting."
+          exit 1
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+
+      # The test database is created with psql, which the job image does not
+      # necessarily carry.
+      - name: the postgres client is installed
+        run: |
+          command -v psql >/dev/null && exit 0
+          # Root in a container has no sudo and needs none; a runner that runs
+          # jobs as somebody else has sudo and needs it.
+          as_root=""
+          [ "$(id -u)" -eq 0 ] || as_root="sudo"
+          $as_root apt-get update -qq
+          $as_root apt-get install -y -qq postgresql-client
+
+      - name: gofmt
+        run: test -z "$(gofmt -l . | tee /dev/stderr)"
+      - name: vet
+        run: go vet ./...
+      # Runs here as well as in `make lint`, because for most of this project's
+      # life `make lint` reported success while golangci-lint was failing: the
+      # recipe was `command -v golangci-lint && golangci-lint run || echo
+      # "not installed"`, and the || caught a lint run that found something.
+      # A check nobody can accidentally swallow belongs in CI.
+      # v7 of the action, not v6: v6 refuses a golangci-lint 2.x version string
+      # outright - "golangci-lint v2 is not supported by golangci-lint-action
+      # v6" - and the config in .golangci.yml is `version: "2"`.
+      # Built from source with this job's Go (install-mode: goinstall), not the
+      # prebuilt release binary: a golangci-lint compiled by an older Go cannot
+      # read a newer toolchain's export data and fails every package with a
+      # typecheck error ("export data version 5 is greater than maximum
+      # supported version 4").
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.13.2
+          install-mode: goinstall
+      - name: build
+        run: CGO_ENABLED=0 go build ./...
+      # Named explicitly, because `go build ./...` compiles what is THERE and
+      # says nothing about what is missing. A stray .gitignore rule once kept
+      # cmd/lexarii out of the repository entirely: every check here passed
+      # while a fresh clone had no server to build at all.
+      - name: the server command is in the repository
+        run: CGO_ENABLED=0 go build -o /dev/null ./cmd/lexarii
+      # The OpenAPI spec is generated from the Go wire types, and the committed
+      # TypeScript is generated from it. A stale spec means the client describes
+      # a contract the server does not have, which is invisible until something
+      # breaks at runtime.
+      - name: the API spec is up to date
+        run: go run ./scripts/apispec -check
+      # Every migration must round-trip. A migration with no working Down is a bug.
+      # Runs before the tests because the store tests assert against a real schema.
+      - name: migrations up / down / up
+        run: make migrate-reset
+
+      - name: create and migrate the test database
+        run: |
+          psql -h "$PGHOST" -U lexarii -d postgres -c "CREATE DATABASE lexarii_test"
+          go run github.com/pressly/goose/v3/cmd/goose@latest -dir migrations postgres "$TEST_DATABASE_URL" up
+
+      - name: test
+        run: go test -race ./...
+
+  frontend:
+    # The only label this server's runner advertises. `ubuntu-latest` matched
+    # until the runner was re-registered, and every job since has sat unpicked -
+    # not failing, simply never starting.
+    #
+    # self-hosted is the one to switch to when a host-mode runner exists again;
+    # it is what the image job wants, because a job in a container has no Docker
+    # of its own.
+    # runs-on: self-hosted
+    runs-on: docker
+    container:
+      image: catthehacker/ubuntu:act-22.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      # Formatting is checked because it has already drifted once: with no
+      # config in the tree, `npx prettier` used its own defaults - two spaces
+      # and double quotes - and rewrote two files that the rest of the tree
+      # writes with tabs and single quotes. Nothing noticed until the diff.
+      - name: formatting
+        run: npx prettier --check .
+      - run: npm run check
+      - run: npm test
+      - run: npm run build
+
+  # The Android app's reader is a WebView page (android/.../assets/reader), and
+  # nothing on the JVM can see inside it. This drives that page headless in
+  # Chromium - the engine the WebView is - see web/tests/android-reader/.
+  #
+  # A job of its own rather than a step in `frontend`, so that trouble fetching
+  # a browser shows up as this job and not as the frontend being broken. On a
+  # laptop with no browser the test skips; here READER_TEST_REQUIRE turns that
+  # into a failure, because a CI check that quietly checked nothing is worse
+  # than a red one.
+  #
+  # Unverified on this runner when written: it needs the job to reach
+  # cdn.playwright.dev (about 110MB, the headless shell only) and apt for the
+  # shell's system libraries, which --with-deps installs. The backend job
+  # already installs from apt as root in this same image.
+  android-reader:
+    # runs-on: self-hosted
+    runs-on: docker
+    container:
+      image: catthehacker/ubuntu:act-22.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      # The build playwright-core is pinned to, from web/package-lock.json.
+      - name: a headless Chromium
+        run: npx playwright-core install --with-deps --only-shell chromium
+      - name: the Android reader page
+        env:
+          READER_TEST_REQUIRE: '1'
+        run: npm run test:android-reader
+
+  # ---------------------------------------------------------------------------
+  # The Android client. No secrets, no host-mode runner, no device - just a
+  # JDK and the Android SDK, both fetchable without credentials, so this runs
+  # on every push rather than waiting for someone to remember it exists.
+  #
+  # sdkmanager's own bootstrap ("commandline-tools") has no apt package and no
+  # Gradle-plugin-managed download, so it is fetched and checksum-verified by
+  # hand here - the same reason the Gradle wrapper below pins a sha256 rather
+  # than trusting whatever a URL currently returns. The sha256 was obtained by
+  # downloading the file and hashing it, not copied from a webpage that could
+  # be wrong or stale; re-verify the same way if this ever needs bumping.
+  # ---------------------------------------------------------------------------
+  android:
+    runs-on: docker
+    container:
+      image: catthehacker/ubuntu:act-22.04
+    env:
+      ANDROID_HOME: /opt/android-sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          # Matches compileOptions.sourceCompatibility in android/app/build.gradle.kts.
+          java-version: '17'
+
+      - name: install the Android SDK (command-line tools, platform 35, build-tools 35.0.0)
+        run: |
+          set -eu
+          url="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
+          sha256="2d2d50857e4eb553af5a6dc3ad507a17adf43d115264b1afc116f95c92e5e258"
+          zip="/tmp/cmdline-tools.zip"
+          curl -fsSL -o "$zip" "$url"
+          echo "$sha256  $zip" | sha256sum -c -
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+          unzip -q "$zip" -d "$ANDROID_HOME/cmdline-tools"
+          # The zip's top-level directory is `cmdline-tools`; sdkmanager
+          # expects it one level deeper, at cmdline-tools/latest.
+          mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          # `yes` is killed by SIGPIPE once sdkmanager stops reading; with
+          # pipefail that exit 141 failed the step. Only sdkmanager's status counts.
+          { yes || true; } | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install \
+            "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      # The Gradle wrapper's own jar is verified separately, at review time
+      # rather than on every run: docs/android-release.md records the check
+      # (built fresh from the checksum-pinned Gradle distribution, byte-
+      # identical to what is committed) because CI re-downloading the whole
+      # Gradle distribution just to re-derive a jar it already trusts would
+      # cost minutes for a property that does not change between commits.
+      - name: unit tests (JVM, no device)
+        run: cd android && ./gradlew testDebugUnitTest --console=plain
+      - name: debug build
+        run: cd android && ./gradlew assembleDebug --console=plain
+      - name: the debug APK exists
+        run: test -f android/app/build/outputs/apk/debug/app-debug.apk
+
+  # ---------------------------------------------------------------------------
+  # The container image.
+  #
+  # Built on every push and never pushed anywhere. The point is not to publish
+  # it: it is that docker-compose.yml says `build: .`, so the Dockerfile is part
+  # of how somebody installs this, and a Dockerfile that has never been built is
+  # a set of instructions nobody has followed. It could not be built where it
+  # was written - that machine's Docker cannot create container networking, so
+  # `npm ci` in the client stage never ran.
+  #
+  # One architecture, the runner's own. The Dockerfile deliberately does not pin
+  # its build stages to $BUILDPLATFORM, because that is a BuildKit-only variable
+  # and the legacy builder fails on the empty string it expands to - which means
+  # a second architecture here would be qemu emulating an `npm ci` and a Go
+  # build rather than cross-compiling them, for tens of minutes per run. Whoever
+  # publishes a release builds the multi-arch image at that point, where the
+  # time is affordable and the result is the thing being shipped.
+  # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # Build the container image, and push it where it can be pulled from.
+  #
+  # Runs on the HOST, with no `container:` block, which is the whole difference
+  # between this working and not. A job inside a container has no Docker of its
+  # own and has to reach the runner's daemon through a mounted socket - and
+  # act_runner drops that mount unless its config allowlists it, so the job
+  # fails on "cannot connect to the Docker daemon", which reads like a broken
+  # Dockerfile and is not one. Asking for a runner setting was the wrong answer
+  # to a problem this workflow had created for itself; the n8n-builder workflow
+  # on this same server has been doing it the plain way all along.
+  #
+  # --network=host on the build for the same reason it is needed locally: the
+  # default bridge fails on this machine at the first step that needs the
+  # network, which is `npm ci`.
+  # ---------------------------------------------------------------------------
+  # ---------------------------------------------------------------------------
+  # The container image.
+  #
+  # BUILDING IS COMMENTED OUT FOR NOW. The image at :latest was built and pushed
+  # by hand from a workstation, verified by pulling it back and running it, so
+  # what this job needs to establish right now is that the published image is
+  # pullable and starts - not that a build machine can produce it. Building here
+  # again costs a `npm ci` and a Go build on every push to prove something that
+  # is already proven; it comes back when there is a host to do it on.
+  #
+  # `make image` and `make push-image` do the build and the publish locally in
+  # the meantime, and both check the image runs before they trust it.
+  # ---------------------------------------------------------------------------
+  image:
+    # runs-on: self-hosted
+    runs-on: docker
+    steps:
+      # Checks as much as this runner allows, and says plainly what it could
+      # not. Three rungs, best first, because the capability here changes: a
+      # host-mode runner makes the first possible, registry credentials make
+      # the second, and today neither exists.
+      #
+      # It exits 0 on the bottom rung rather than failing. A job that is
+      # permanently red for a configuration gap teaches people to ignore red,
+      # which costs more than this job is worth - but it is loud about having
+      # verified nothing, because a check that quietly asserts success is worse
+      # than no check at all.
+      - name: the published image
+        env:
+          IMAGE: scm.poniatowski.dev/adam/lexarii:latest
+          REGISTRY: scm.poniatowski.dev
+          REPO: adam/lexarii
+          REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          set -eu
+
+          # 1. With a daemon: pull it and start it. The only check that proves
+          #    the image RUNS - a build can succeed and still produce something
+          #    that dies on a missing certificate bundle or a wrong entrypoint.
+          if docker info >/dev/null 2>&1; then
+            echo "docker daemon reachable; pulling and running $IMAGE"
+            docker pull "$IMAGE"
+            version=$(docker run --rm "$IMAGE" -version)
+            echo "image reports: $version"
+            test -n "$version"
+            docker run --rm --entrypoint id "$IMAGE"
+            exit 0
+          fi
+
+          # 2. Without one, but with credentials: ask the registry whether the
+          #    image is there. Proves it was published and is pullable. Does
+          #    not prove it starts, and does not pretend to.
+          if [ -n "${REGISTRY_PASSWORD:-}" ]; then
+            echo "no docker daemon; asking the registry whether $IMAGE exists"
+            # Headers dumped and grepped rather than curl's %header{}, which
+            # needs curl 8.3 and this runner's image may be older.
+            digest=$(curl -fsS -u "$REGISTRY_USER:$REGISTRY_PASSWORD" \
+              -H "Accept: application/vnd.docker.distribution.manifest.v2+json" \
+              -D - -o /dev/null "https://$REGISTRY/v2/$REPO/manifests/latest" \
+              | tr -d '\r' | awk -F': ' 'tolower($1)=="docker-content-digest" {print $2}')
+            echo "published digest: $digest"
+            test -n "$digest"
+            echo "::notice::The image is published. Whether it STARTS is unchecked -"
+            echo "::notice::that needs a runner with a Docker daemon."
+            exit 0
+          fi
+
+          # 3. Neither. Say so at full volume and stop.
+          echo "::notice::This job checked NOTHING about the container image."
+          echo "::notice::No Docker daemon is reachable from a job in a container,"
+          echo "::notice::and no REGISTRY_USER / REGISTRY_PASSWORD secrets are set,"
+          echo "::notice::so it can neither run the image nor ask whether it exists."
+          echo "::notice::"
+          echo "::notice::To check that it is published: set those two secrets."
+          echo "::notice::To check that it RUNS: give this repository a host-mode"
+          echo "::notice::runner and switch runs-on to self-hosted, or allow the"
+          echo "::notice::socket through in the runner's config.yml under"
+          echo "::notice::  container: { valid_volumes: ['/var/run/docker.sock'] }"
+          echo "::notice::"
+          echo "::notice::Meanwhile: make image, and make push-image, do both locally."
+
+      # --- Building it here. Restore when there is a machine to build on. -----
+      #
+      # - name: build the image
+      #   run: |
+      #     docker build --network=host \
+      #       --build-arg VERSION="${{ github.sha }}" \
+      #       -t lexarii:ci .
+      #
+      # - name: the built image runs
+      #   run: |
+      #     built=$(docker run --rm lexarii:ci -version)
+      #     test "$built" = "${{ github.sha }}"
+      #
+      # - name: push to the registry
+      #   if: github.ref == 'refs/heads/main'
+      #   env:
+      #     REGISTRY: scm.poniatowski.dev
+      #     IMAGE: scm.poniatowski.dev/adam/lexarii
+      #     # Through env, not read in the step's `if`: the secrets context is
+      #     # not available to a conditional, so testing it there evaluates to
+      #     # empty, the step runs anyway, and a docker login with no password
+      #     # looks like bad credentials rather than absent ones.
+      #     REGISTRY_USER: ${{ secrets.REGISTRY_USER }}
+      #     REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+      #   run: |
+      #     if [ -z "$REGISTRY_PASSWORD" ]; then
+      #       echo "no registry credentials set; image built and verified, not published"
+      #       exit 0
+      #     fi
+      #     echo "$REGISTRY_PASSWORD" \
+      #       | docker login "$REGISTRY" -u "$REGISTRY_USER" --password-stdin
+      #     docker tag lexarii:ci "$IMAGE:latest"
+      #     docker tag lexarii:ci "$IMAGE:${{ github.sha }}"
+      #     docker push "$IMAGE:latest"
+      #     docker push "$IMAGE:${{ github.sha }}"
+
+  # ---------------------------------------------------------------------------
+  # Mirror to GitHub.
+  #
+  # scm.poniatowski.dev is canonical and is where commits land; GitHub is a
+  # read-only mirror.
+  #
+  # TODO(adam): fill this in from the working setup on your other projects.
+  #   Needed: the GitHub repo URL, the deploy key or PAT secret name, and
+  #   whether to mirror all refs and tags or only main.
+  # ---------------------------------------------------------------------------
+  mirror:
+    # The only label this server's runner advertises. `ubuntu-latest` matched
+    # until the runner was re-registered, and every job since has sat unpicked -
+    # not failing, simply never starting.
+    #
+    # self-hosted is the one to switch to when a host-mode runner exists again;
+    # it is what the image job wants, because a job in a container has no Docker
+    # of its own.
+    # runs-on: self-hosted
+    runs-on: docker
+    container:
+      image: catthehacker/ubuntu:act-22.04
+    needs: [backend, frontend, android]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # mirroring needs full history, not a shallow clone
+
+      - name: Push to GitHub mirror
+        env:
+          MIRROR_URL: ${{ secrets.GITHUB_MIRROR_URL }}
+        run: scripts/mirror.sh

@@ -1,0 +1,93 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+/*
+ * An example branding stylesheet for Lexarii. Not loaded by default.
+ *
+ * To use it, copy this file and logo.svg into the directory named by
+ * LEXARII_BRANDING_DIR and restart the server. Every hook and token used here
+ * is part of the supported contract in docs/BRANDING.md.
+ */
+
+/* --- Colours: the same selectors as tokens.css, so these win in every theme --- */
+
+:root {
+	--accent: #1d5c63;
+	--accent-fg: #ffffff;
+	--focus-ring: #1d5c63;
+}
+
+:root[data-theme='dark'] {
+	--accent: #7cc4cc;
+	--accent-fg: #0f1416;
+	--focus-ring: #7cc4cc;
+}
+
+@media (prefers-color-scheme: dark) {
+	:root:not([data-theme='light']):not([data-theme='sepia']):not([data-theme='black']) {
+		--accent: #7cc4cc;
+		--accent-fg: #0f1416;
+		--focus-ring: #7cc4cc;
+	}
+}
+
+/* --- A typeface of your own, served from the branding directory ---
+ *
+ * @font-face {
+ *	font-family: 'House Serif';
+ *	src: url('fonts/HouseSerif.woff2') format('woff2');
+ *	font-display: swap;
+ * }
+ *
+ * body[data-page='signin'] .auth-brand { font-family: 'House Serif', var(--font-serif); }
+ */
+
+/* --- The sign-in page --- */
+
+/* A slow wash of the accent colour behind the card. Oversized so it can drift
+ * without showing an edge; transform only, so the browser never lays the page
+ * out again for it. For a picture instead:
+ *   background: url('background.webp') center / cover no-repeat;
+ */
+body[data-page='signin'] .auth-decoration {
+	inset: -20%;
+	background:
+		radial-gradient(circle at 25% 25%, color-mix(in srgb, var(--accent) 24%, transparent), transparent 45%),
+		radial-gradient(circle at 75% 70%, color-mix(in srgb, var(--accent) 16%, transparent), transparent 40%);
+	animation: branding-drift 40s ease-in-out infinite alternate;
+}
+
+@keyframes branding-drift {
+	to {
+		transform: translate3d(6%, 4%, 0) rotate(4deg);
+	}
+}
+
+/* Somebody who asked for less motion gets the same picture, standing still. */
+@media (prefers-reduced-motion: reduce) {
+	body[data-page='signin'] .auth-decoration {
+		animation: none;
+	}
+}
+
+body[data-page='signin'] .auth-card {
+	margin-top: 10vh;
+	padding: var(--space-8) var(--space-6);
+	background: var(--bg-raised);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	box-shadow: var(--shadow-raised);
+}
+
+/* A logo above the heading. The heading's text stays, so the page still has a
+ * name for a screen reader and for a browser that blocks the image. */
+body[data-page='signin'] .auth-brand::before {
+	content: '';
+	display: block;
+	width: 3rem;
+	height: 3rem;
+	margin-bottom: var(--space-3);
+	background: url('logo.svg') center / contain no-repeat;
+}
+
+body[data-page='signin'] .auth-links {
+	border-top-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+}

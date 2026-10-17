@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Lexarii itself. One static binary, one environment file, one data directory.
+#
+#   sudo cp deploy/systemd/lexarii.service /etc/systemd/system/
+#   sudo useradd --system --home /var/lib/lexarii --create-home lexarii
+#   sudo cp bin/lexarii /usr/local/bin/
+#   sudo install -o lexarii -g lexarii -m 600 .env /etc/lexarii.env
+#   sudo systemctl enable --now lexarii
+#
+# The environment file holds a database password and possibly an API key, hence
+# mode 600 and an owner that is not you.
+
+[Unit]
+Description=Lexarii
+Documentation=https://scm.poniatowski.dev/adam/lexarii
+# Wants rather than Requires: Postgres on another machine is a normal setup,
+# and a local one that is slow to start should delay Lexarii rather than
+# fail it. Lexarii retries its connection.
+Wants=postgresql.service
+After=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=lexarii
+Group=lexarii
+EnvironmentFile=/etc/lexarii.env
+ExecStart=/usr/local/bin/lexarii
+Restart=on-failure
+RestartSec=5s
+
+# The library directory is READ-ONLY to Lexarii, which is the first invariant
+# in this project - and ProtectSystem=strict below enforces it at the kernel
+# rather than trusting the code: the whole filesystem is read-only to this unit
+# except the state directory. A bug cannot write to somebody's books even if it
+# tries.
+#
+# StateDirectory is the one writable place: covers, extracted text, uploads.
+# Point LEXARII_DATA_DIR at it.
+StateDirectory=lexarii
+WorkingDirectory=/var/lib/lexarii
+
+# Lexarii reads books, writes derived artefacts, and talks to Postgres and a
+# model server. It needs nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target

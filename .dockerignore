@@ -1,0 +1,33 @@
+# What must not reach the build context.
+#
+# The context is sent to the daemon before anything runs, so this is both a
+# speed question and a safety one: .env holds a real API key and has no business
+# in an image layer.
+
+.env
+.env.*
+!.env.example
+
+# Someone's actual library and everything derived from it.
+data/
+library/
+*-token
+
+# Build output. The image builds its own.
+bin/
+web/build/
+web/node_modules/
+node_modules/
+internal/http/static/*
+!internal/http/static/index.html
+
+# History and tooling.
+.git/
+.gitignore
+.playwright-mcp/
+*.png
+!library-desktop.png
+
+# Test databases and scratch files.
+*.sql.bak
+eval/*.json

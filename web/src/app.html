@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+		<meta name="color-scheme" content="light dark" />
+		<!-- Until a page names itself in <svelte:head>, and for one that never does. -->
+		<title>Lexarii</title>
+		<link rel="icon" href="%sveltekit.assets%/favicon.svg" />
+		<!--
+			The theme is applied before anything paints.
+			
+			Inline and synchronous on purpose: done from a component, the first
+			frame is light and then flips, which on a dark theme is a flash of
+			white at every cold load - the one moment a reader is most likely
+			to be somewhere dark.
+
+			No attribute at all means "follow the system", which is what the
+			prefers-color-scheme block in tokens.css answers. This element used
+			to carry data-theme="light" unconditionally, which made that block
+			unreachable and every one of the dark, sepia and black palettes
+			dead: they were written, complete, and could never be selected.
+		-->
+		<script>
+			try {
+				var saved = localStorage.getItem('lexarii.theme');
+				if (saved && saved !== 'system') {
+					document.documentElement.setAttribute('data-theme', saved);
+				}
+			} catch (e) {
+				/* private mode, or storage refused: the system preference stands */
+			}
+		</script>
+		%sveltekit.head%
+	</head>
+	<body data-sveltekit-preload-data="hover">
+		<div style="display: contents">%sveltekit.body%</div>
+	</body>
+</html>

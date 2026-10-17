@@ -1,0 +1,1 @@
+Read and sync your self-hosted Lexarii ebook library.

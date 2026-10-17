@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!--
+  The page the Android reader draws a chapter into.
+
+  Loaded with the server's address as its base, so the image paths the server
+  writes into a chapter resolve - and every one of those requests is answered
+  by the app, which adds the bearer token, rather than by the network.
+
+  {{NONCE}} is replaced per load. The policy allows exactly the two scripts
+  below and nothing else: a chapter is sanitised on the server and carries no
+  script, and if one ever slipped through it would still not run.
+
+  {{THEME}} is the theme to draw the first frame in (light, sepia, dark or
+  black), so a dark reader never flashes white while the page loads.
+  Reader.setTypography takes over from there; see reader.js.
+
+  {{LANG}} is the language of the text: the edition's, as a BCP 47 tag, when
+  the app knows it, and "und" - undetermined, which is true - when it does
+  not. It is what a screen reader picks its voice by, and what hyphenation
+  and quotation marks follow.
+
+  Each script's placeholder is a JavaScript comment around its name, and the
+  whole comment is what gets replaced. Bare, the name in braces was a block
+  holding an identifier: a statement that does nothing, and a ReferenceError
+  if the page were ever opened unassembled. As a comment each script is
+  simply empty until the app fills it.
+-->
+<html lang="{{LANG}}" data-theme="{{THEME}}">
+<head>
+<meta charset="utf-8">
+<title>Lexarii</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; img-src 'self' data:; style-src 'nonce-{{NONCE}}'; script-src 'nonce-{{NONCE}}'">
+<style nonce="{{NONCE}}">
+  /*
+   * Typography, set by Reader.setTypography as attributes on the html
+   * element and custom properties on it: a change is one style recalculation,
+   * never a rebuilt chapter. The defaults here are what the page looked like
+   * before the settings existed, so an app that never calls it sees no change.
+   *
+   * No tag in angle brackets in these comments, even as prose: a static
+   * analyser that tokenises the whole file as markup reads one as a second
+   * element, and a stray html start tag there made it report the page as
+   * having no title and no language.
+   *
+   * System fonts only. Bundling a serif would add megabytes to the APK for
+   * something every Android device already has: Noto Serif is the platform's
+   * `serif` since Android 7, Droid Serif before it, and Roboto is `sans-serif`.
+   * Georgia and the rest are for the same page opened in a desktop browser.
+   */
+  :root {
+    --serif: "Noto Serif", "Droid Serif", Georgia, "Source Serif 4", "Times New Roman", serif;
+    --sans: Roboto, "Noto Sans", "Droid Sans", "Helvetica Neue", Arial, sans-serif;
+    --reader-font: var(--serif);
+    --font-scale: 1;
+    --line-height: 1.6;
+    /* The page margin, as the viewport's padding. */
+    --margin-x: 22px;
+    --margin-y: 28px;
+    /* The longest line allowed, in the text's own ems: about 65-70 characters
+       of a book serif, which is where reading is comfortable. On a phone the
+       screen is narrower than this and the margin decides; on a tablet or a
+       phone turned sideways this is what stops a line running to 150. */
+    --measure: 34em;
+  }
+  :root[data-font="sans"] { --reader-font: var(--sans); }
+  :root[data-margin="narrow"] { --margin-x: 14px; --margin-y: 20px; }
+  :root[data-margin="wide"] { --margin-x: 34px; --margin-y: 40px; }
+
+  /*
+   * Themes. In every one the ink is at least 7:1 on its page (AAA) and at
+   * least 4.5:1 on every highlight fill (AA; in practice 6.5:1 and up), a link
+   * is at least 4.5:1, the shared underline and the note dot at least 3:1, and
+   * every fill differs visibly from the page. The theme cases in
+   * web/tests/android-reader/ check all of it on the rendered page.
+   */
+  :root {
+    --page: #fbf8f1;
+    --ink: #1f1c17;
+    --muted: #6b645a;
+    --link: #7a4a12;
+    --cited: #f3e2b8;
+    /* Highlight fills. Opaque rather than translucent, so overlapping marks
+       cannot stack into a background the ink no longer reads against; every
+       one keeps the ink above 10:1 here and above 6:1 in the dark theme. */
+    --mark: #f2d9a2;
+    --mark-yellow: #f6e78a;
+    --mark-green: #cfe6b6;
+    --mark-blue: #c9dcf1;
+    --mark-pink: #f3cad6;
+    --mark-shared: #8a6a2e;
+    --mark-note: #b0601c;
+  }
+  /* Set by the app from the system setting, not by prefers-color-scheme: a
+     WebView answers that from the app's window theme, which is not the same
+     question. */
+  :root[data-theme="sepia"] {
+    --page: #f4ecd8;
+    --ink: #3a2f21;
+    --muted: #6a5a43;
+    --link: #7a4212;
+    --cited: #e6d3a3;
+    --mark: #e5c88c;
+    --mark-yellow: #eedb78;
+    --mark-green: #c9dba6;
+    --mark-blue: #c2d2de;
+    --mark-pink: #e8c0c3;
+    --mark-shared: #7f5f26;
+    --mark-note: #a4541a;
+  }
+  :root[data-theme="dark"] {
+    --page: #16140f;
+    --ink: #e6e0d4;
+    --muted: #9a9284;
+    --link: #e2b477;
+    --cited: #4a3c1c;
+    --mark: #57432a;
+    --mark-yellow: #534d1e;
+    --mark-green: #2e4a2c;
+    --mark-blue: #283f59;
+    --mark-pink: #5a2f3e;
+    --mark-shared: #c9a262;
+    --mark-note: #eea25c;
+  }
+  /* True black, for OLED: a black pixel is an unlit one. The ink is a little
+     dimmer than the dark theme's, because full-strength light text on pure
+     black blooms, and the fills are darker to keep it above 7:1 on them. */
+  :root[data-theme="black"] {
+    --page: #000000;
+    --ink: #d2cdc3;
+    --muted: #8f887c;
+    --link: #dcaa68;
+    --cited: #3a2f14;
+    --mark: #46351d;
+    --mark-yellow: #403b12;
+    --mark-green: #223a22;
+    --mark-blue: #1e3149;
+    --mark-pink: #472231;
+    --mark-shared: #b89154;
+    --mark-note: #e0934e;
+  }
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    /* A sideways swipe turns a page and is nothing to the browser: not a pan,
+       and so never the swipe-to-go-back Chrome offers wherever there is
+       history. overscroll-behavior does not stop that; this does. It governs
+       panning only - long-press selection and the touch events reader.js
+       reads are untouched - and nothing here scrolls either way anyway. */
+    touch-action: pan-y;
+    background: var(--page);
+    color: var(--ink);
+    -webkit-text-size-adjust: 100%;
+    -webkit-tap-highlight-color: transparent;
+  }
+  /* The padding is the page margin. overflow: hidden clips at the border box,
+     so the column gap is twice this - see columnGap() in reader.js.
+     The text size is set here rather than on #flow so that the ems in the
+     padding are the text's own: the measure grows with the type. */
+  #viewport {
+    box-sizing: border-box;
+    height: 100%;
+    font-size: calc(1.08rem * var(--font-scale));
+    padding: var(--margin-y) max(var(--margin-x), calc((100% - var(--measure)) / 2));
+    overflow: hidden;
+  }
+  #flow {
+    height: 100%;
+    column-fill: auto;
+    font-family: var(--reader-font);
+    font-size: 1em;
+    line-height: var(--line-height);
+    hyphens: auto;
+    text-align: start;
+    overflow-wrap: break-word;
+    will-change: transform;
+    transition: transform 180ms ease-out;
+  }
+  #flow p { margin: 0 0 0.9em; }
+  #flow h1, #flow h2, #flow h3, #flow h4 { line-height: 1.25; break-after: avoid; }
+  #flow a { color: var(--link); }
+  /* object-fit, because a picture held by both limits at once keeps the
+     width its markup gave it and would be squashed into the height: a cover
+     on a phone turned sideways. Contained, it keeps its shape. */
+  #flow img, #flow svg {
+    max-width: 100%;
+    max-height: calc(100vh - 2 * var(--margin-y));
+    height: auto;
+    object-fit: contain;
+    break-inside: avoid;
+  }
+  #flow img[data-blocked] { display: none; }
+  #flow pre { white-space: pre-wrap; }
+  #flow .cited { background: var(--cited); transition: background 600ms; }
+
+  /* Highlights, painted by wrapping the text in a mark element. Nothing here
+     may take space - no padding, no border, no inline-block - because a mark
+     that widened a line would move the words it marks and the page they are
+     on. */
+  #flow mark.sm-highlight {
+    background: var(--mark);
+    color: inherit;
+    border-radius: 2px;
+  }
+  #flow mark.sm-highlight[data-colour="yellow"] { background: var(--mark-yellow); }
+  #flow mark.sm-highlight[data-colour="green"] { background: var(--mark-green); }
+  #flow mark.sm-highlight[data-colour="blue"] { background: var(--mark-blue); }
+  #flow mark.sm-highlight[data-colour="pink"] { background: var(--mark-pink); }
+  /* Somebody else's mark: an outline of the passage rather than a fill, so it
+     is never mistaken for one of the reader's own. Decoration, not layout. */
+  #flow mark.sm-highlight[data-shared] {
+    background: transparent;
+    text-decoration: underline dashed var(--mark-shared);
+    text-decoration-thickness: 2px;
+    text-underline-offset: 0.22em;
+    text-decoration-skip-ink: none;
+  }
+  /* A note: a dot at the end of the passage. Absolutely positioned with no
+     offsets, so it sits at its static position - where the next character
+     would go - and takes no space in the line. The mark is deliberately NOT
+     position: relative: a positioned inline that wraps becomes the dot's
+     containing block, and Gecko then puts the dot lines away from the text. */
+  #flow mark.sm-highlight[data-note]::after {
+    content: "";
+    position: absolute;
+    width: 0.4em;
+    height: 0.4em;
+    margin: -0.05em 0 0 0.02em;
+    border-radius: 50%;
+    background: var(--mark-note);
+  }
+
+  /* Nothing in the reader animates for somebody who asked for no motion: a
+     page turn is a jump. */
+  @media (prefers-reduced-motion: reduce) {
+    #flow, #flow .cited { transition: none; }
+  }
+</style>
+</head>
+<body>
+<div id="viewport"><div id="flow"></div></div>
+<script nonce="{{NONCE}}">/*{{LOCATOR_JS}}*/</script>
+<script nonce="{{NONCE}}">/*{{READER_JS}}*/</script>
+</body>
+</html>

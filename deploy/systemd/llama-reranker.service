@@ -1,0 +1,88 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# OPTIONAL. A cross-encoder that reorders retrieved passages before they are
+# read. Lexarii works without it: leave LEXARII_RERANK_BASE_URL unset and
+# none of this is needed.
+#
+# It is its own service because it is its own MODEL. A cross-encoder reads the
+# question and one passage together and scores the pair - a different job from
+# writing answers, and a different model from the one that does it. Asking a
+# chat model to rank passages was measured on a real library and made retrieval
+# worse; see the README.
+#
+# Deliberately the same shape as an embedding server on the same machine, so a
+# host already running llama-gemma and llama-embeddings gains a third unit that
+# looks like its neighbours. What differs is three flags and the port.
+#
+# 8083, because the rest of the documentation gives 8080 to Lexarii, 8081 to
+# the chat model and 8082 to embeddings, and the compose file defaults to
+# those. Change it if your model host is laid out differently - nothing
+# depends on the number except the URL you hand Lexarii.
+#
+#   sudo cp llama-reranker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now llama-reranker
+#   journalctl -u llama-reranker -f     # first start downloads ~640MB
+#
+# Then, on the Lexarii host, in .env:
+#
+#   LEXARII_RERANK_BASE_URL=http://<this-host>:8083/v1
+#   LEXARII_RERANK_MODEL=bge-reranker-v2-m3
+#
+# bge-reranker-v2-m3 is 636MB at Q8_0 and 0.6B parameters. Under a gigabyte of
+# VRAM, so it sits beside a chat model on one card: measured on a 12GB RTX 3060
+# already serving a 12B chat model and an embedding model, scoring twenty
+# full-length passages takes 280-360ms.
+#
+# If that card is full, add --n-gpu-layers 0 to keep this on the CPU. That
+# costs latency and nothing else - the scores are the same, there are just
+# fewer of them per second.
+
+[Unit]
+Description=llama.cpp reranking server (bge-reranker-v2-m3)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Adjust to wherever your llama-server binary actually lives.
+#
+# --reranking exposes the endpoint and --pooling rank is what makes the model
+# return a score per document rather than a vector. Both are required; one
+# without the other gives a server that either has no /rerank endpoint or
+# answers it with the wrong shape.
+#
+# Some builds also want --embeddings alongside them. Add it if the endpoint is
+# missing on yours; it is harmless on a server dedicated to this model.
+ExecStart=/usr/local/bin/llama-server \
+    -hf gpustack/bge-reranker-v2-m3-GGUF:Q8_0 \
+    --reranking \
+    --pooling rank \
+    --host 0.0.0.0 \
+    --port 8083 \
+    -c 2048 \
+    -b 2048 \
+    -ub 2048
+
+# Model cache lands in /var/lib/llama-reranker, created automatically.
+#
+# This is the line that matters. With ProtectHome and a dynamic user there is
+# no home directory to download into, so without LLAMA_CACHE pointed at a
+# writable StateDirectory the -hf fetch has nowhere to go: the first start
+# stalls or fails, and every restart downloads 636MB again.
+StateDirectory=llama-reranker
+Environment=LLAMA_CACHE=/var/lib/llama-reranker
+
+DynamicUser=yes
+Restart=on-failure
+RestartSec=5
+
+# Modest hardening; drop these if they get in the way.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+
+[Install]
+WantedBy=multi-user.target

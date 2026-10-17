@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!--
+    Cleartext is permitted, deliberately and with the reason written down.
+
+    Lexarii is self-hosted. A great many installations are http://box.local
+    on somebody's own LAN with no certificate anywhere, and an app that refused
+    to talk to them would be an app that does not work for the people it is
+    for. The token is still only ever sent to the address the user typed.
+
+    Android's default (cleartext denied) is right for an app talking to one
+    known service on the internet. This one talks to whatever the user owns.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <!-- A self-hoster's own CA, if they install one on the device. -->
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

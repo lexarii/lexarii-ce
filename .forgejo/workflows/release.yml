@@ -1,0 +1,186 @@
+# Forgejo Actions (GitHub Actions-compatible syntax), kept portable so the
+# GitHub mirror can run it unchanged.
+#
+# Publishing, on a tag. CI on main is what says the code is correct; this
+# workflow says what a release IS - a multi-architecture container image and a
+# pair of static binaries, both reporting the tag they were cut from.
+#
+# It builds everything whether or not a registry is configured, and pushes only
+# if it is. A release workflow that has never run until the day of the release
+# is a release workflow nobody has tested.
+#
+# Each job names its container image, for the reason recorded at the top of
+# ci.yml: the runner's label map pointed at an image that does not exist, and
+# every job failed in a second.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Static binaries.
+  #
+  # Cross-compiled rather than emulated: CGO_ENABLED=0 is a project invariant,
+  # so GOARCH is all it takes and both architectures build in the time one
+  # native build would.
+  # ---------------------------------------------------------------------------
+  binaries:
+    # The only label this server's runner advertises. `ubuntu-latest` matched
+    # until the runner was re-registered, and every job since has sat unpicked -
+    # not failing, simply never starting.
+    #
+    # self-hosted is the one to switch to when a host-mode runner exists again;
+    # it is what the image job wants, because a job in a container has no Docker
+    # of its own.
+    # runs-on: self-hosted
+    runs-on: docker
+    container:
+      image: catthehacker/ubuntu:act-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+          cache: true
+
+      # The client is embedded in the binary with go:embed, so it has to exist
+      # before the Go build runs. The repository ships a placeholder index.html
+      # in that directory - go:embed fails outright on an empty one - which
+      # this replaces.
+      - name: build the client
+        env:
+          # The client names itself after this, and the name is baked into
+          # every generated module. Without it SvelteKit uses Date.now() and
+          # the published artifact cannot be reproduced from its tag.
+          LEXARII_BUILD_VERSION: ${{ github.ref_name }}
+        run: |
+          cd web
+          npm ci
+          npm run build
+          rm -rf ../internal/http/static
+          cp -r build ../internal/http/static
+
+      - name: build the binaries
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build \
+              -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "dist/lexarii-linux-${arch}" ./cmd/lexarii
+          done
+          cd dist && sha256sum lexarii-linux-* > SHA256SUMS
+          cat SHA256SUMS
+
+      # The one thing a cross-compiled binary can still get wrong is the
+      # version it was stamped with, and that is the thing every later bug
+      # report depends on. The host is amd64, so that is the one that can run.
+      - name: the binary reports the tag
+        run: |
+          built=$(./dist/lexarii-linux-amd64 -version)
+          echo "binary reports: $built"
+          test "$built" = "${{ github.ref_name }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lexarii-${{ github.ref_name }}
+          path: dist/
+
+  # ---------------------------------------------------------------------------
+  # The container image, for both architectures.
+  #
+  # CI builds one architecture on every push, for the runner's own; this is
+  # where the second one is worth waiting for. The arm64 half runs under qemu,
+  # because the Dockerfile deliberately does not pin its build stages to
+  # $BUILDPLATFORM - that is a BuildKit-only variable and the legacy builder
+  # fails on the empty string it expands to. Emulating `npm ci` and a Go build
+  # costs tens of minutes, which is affordable once per release and is not
+  # affordable on every push.
+  # ---------------------------------------------------------------------------
+  image:
+    # The only label this server's runner advertises. `ubuntu-latest` matched
+    # until the runner was re-registered, and every job since has sat unpicked -
+    # not failing, simply never starting.
+    #
+    # self-hosted is the one to switch to when a host-mode runner exists again;
+    # it is what the image job wants, because a job in a container has no Docker
+    # of its own.
+    # runs-on: self-hosted
+    runs-on: docker
+    container:
+      image: catthehacker/ubuntu:act-22.04
+    needs: [binaries]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      # Two registries, either optional. The canonical server's own registry is
+      # where a release belongs; GHCR is for people who found the project
+      # through the mirror. Absent credentials mean the image is built and not
+      # pushed, which still proves the Dockerfile builds for both.
+      - name: log in to the canonical registry
+        if: vars.REGISTRY_HOST != ''
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.REGISTRY_HOST }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_TOKEN }}
+
+      - name: work out the tags
+        id: tags
+        env:
+          REF: ${{ github.ref_name }}
+          HOST: ${{ vars.REGISTRY_HOST }}
+          REPO: ${{ vars.REGISTRY_REPOSITORY }}
+        run: |
+          if [ -z "$HOST" ]; then
+            echo "no REGISTRY_HOST configured - the image will be built and not pushed"
+            echo "push=false" >> "$GITHUB_OUTPUT"
+            echo "tags=lexarii:${REF}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          image="${HOST}/${REPO:-adam/lexarii}"
+          tags="${image}:${REF}"
+          # `latest` only for a real release. A pre-release tag - v1.2.0-rc1,
+          # v1.2.0-beta - must not become what `docker pull` gives someone who
+          # named no tag at all.
+          case "$REF" in
+            v[0-9]*.[0-9]*.[0-9]*) tags="${tags},${image}:latest" ;;
+            *) echo "pre-release tag: not tagging latest" ;;
+          esac
+          echo "push=true" >> "$GITHUB_OUTPUT"
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - name: build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ steps.tags.outputs.push == 'true' }}
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          # Loaded locally as well, so the smoke test below has something to
+          # run. Only the host architecture can be loaded from a multi-platform
+          # build, which is the one that can be executed here anyway.
+          outputs: type=image
+
+      # Built for two architectures and never started is not a release. This
+      # builds the host's architecture once more - cached, so it costs
+      # seconds - loads it, and asks it what it is.
+      - name: the image runs and reports the tag
+        run: |
+          docker buildx build --load -t lexarii:release \
+            --build-arg VERSION="${{ github.ref_name }}" .
+          built=$(docker run --rm lexarii:release -version)
+          echo "image reports: $built"
+          test "$built" = "${{ github.ref_name }}"

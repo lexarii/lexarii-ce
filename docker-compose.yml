@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    environment:
+      POSTGRES_USER: lexarii
+      # From .env, which is not committed, and with no default: a password
+      # written in this file is a password everybody who has read it knows.
+      # It is set when the volume is first created and kept after that, so
+      # changing it here later does not change the database's.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env - see .env.example}
+      POSTGRES_DB: lexarii
+    ports:
+      # This machine only. `make dev` and the tools connect from here, and the
+      # server below reaches it over the compose network without this port.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lexarii"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  lexarii:
+    # Both, deliberately. `docker compose --profile full up` PULLS this image;
+    # `up --build` builds it from this checkout and tags it the same. So the
+    # same file runs a published image on a server and a working copy on a
+    # laptop, and LEXARII_IMAGE points at a different tag when you want to
+    # try one - a commit sha, say, rather than latest.
+    image: ${LEXARII_IMAGE:-scm.poniatowski.dev/adam/lexarii:latest}
+    build: .
+    profiles: ["full"]          # `docker compose --profile full up` — plain `up` starts only postgres, for local dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Letters and digits only in the password (`openssl rand -hex 24`), since it is
+      # spliced into a URL here.
+      DATABASE_URL: postgres://lexarii:${POSTGRES_PASSWORD}@postgres:5432/lexarii?sslmode=disable
+      LEXARII_LIBRARY_DIR: /library
+      LEXARII_DATA_DIR: /data
+      LEXARII_LLM_BASE_URL: ${LEXARII_LLM_BASE_URL:-http://host.docker.internal:8081/v1}
+      LEXARII_EMBED_BASE_URL: ${LEXARII_EMBED_BASE_URL:-http://host.docker.internal:8082/v1}
+      # Reranking is off unless a URL is set, so this passes through empty
+      # rather than guessing a port nobody is serving on.
+      LEXARII_RERANK_BASE_URL: ${LEXARII_RERANK_BASE_URL:-}
+      LEXARII_RERANK_MODEL: ${LEXARII_RERANK_MODEL:-}
+    ports:
+      - "8080:8080"
+    volumes:
+      # READ-ONLY, deliberately. Lexarii must never write to your book files.
+      - ${LEXARII_LIBRARY_DIR:-./library}:/library:ro
+      - appdata:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  pgdata:
+  appdata:
