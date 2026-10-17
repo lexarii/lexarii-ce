@@ -812,6 +812,25 @@ paths:
       description: |
         Stateless. Same pipeline as a conversation but nothing is stored, which
         is what a script wants. Use /conversations to keep the history.
+
+        A factual or summary question that names one book is answered from
+        that book alone, and `scopedTo` says which. The name is resolved
+        among the books the asker may read; it narrows the search only when
+        it means exactly one of them - the only one whose title is the name
+        (ignoring case, punctuation and a leading article) or, failing that,
+        the only one whose title contains it as whole words. A book that
+        matched only by its author, series or file name never counts, even
+        alone. Candidates are read best title match first. Otherwise,
+        and when the narrowed search finds no passages, the whole library is
+        searched and `scopedTo` is absent. A request with `bookFileId` is
+        already scoped and is never narrowed further.
+
+        A request for books (`find-book`, `broad-topic`) is answered with
+        `books`: by subject, then by title. When neither matches - in a
+        library that was never enriched no book has a subject - the books are
+        found by searching their text for the topic, and `answer` says so
+        above the list. When nothing matches at all, `books` is empty and
+        `answer` says that, rather than listing an unrelated book.
       requestBody:
         required: true
         content:
@@ -905,6 +924,11 @@ paths:
     get:
       tags: [ask]
       summary: One thread and its messages
+      description: |
+        A turn that answered with a reading list carries it in `books`, in the
+        order it was shown, so a reopened thread shows the list rather than an
+        empty answer. Only books the reader may still open are listed; one
+        they have lost access to since is left out.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
@@ -931,6 +955,13 @@ paths:
         The thread's history is carried into routing as well as into the
         answer. Routing "and how is it used in practice?" on its own produces a
         search for the words "in practice".
+
+        The history names the books each earlier answer listed or cited, so
+        "the book" in a follow-up can be resolved to one of them. A book is
+        taken from the history only when the question refers back to it; a
+        question that stands on its own does not inherit one. A book resolved
+        this way narrows the search as on /ask, and the answer's `scopedTo`
+        says so.
       parameters:
         - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:

@@ -3,6 +3,7 @@
 package postgres
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 
@@ -10,6 +11,7 @@ import (
 
 	"scm.poniatowski.dev/adam/lexarii/internal/domain"
 	"scm.poniatowski.dev/adam/lexarii/internal/ingest"
+	"scm.poniatowski.dev/adam/lexarii/internal/store"
 )
 
 // seedLibrary inserts n books with predictable titles and authors.
@@ -613,5 +615,84 @@ func TestSubjectsAreCountedOverWhatYouCanRead(t *testing.T) {
 	}
 	if len(none) != 0 {
 		t.Fatalf("a stranger was shown %d subjects", len(none))
+	}
+}
+
+// A name is resolved to a book by title match, best first, before the limit:
+// sorted by title, the one book called "It" was the 21st of 21 titles
+// containing the letters and fell off a page of twenty.
+func TestALibraryByTitleMatchPutsTheExactTitleFirst(t *testing.T) {
+	p := testPool(t)
+	cleanLibrary(t, p)
+	books := []struct{ title, author string }{{"It", "Stephen King"}, {"Bring It On", "A Writer"}}
+	for i := 1; i <= 19; i++ {
+		books = append(books, struct{ title, author string }{fmt.Sprintf("A Habit of Mind %02d", i), "Someone"})
+	}
+	owner := seedLibrary(t, p, books)
+
+	plain, err := p.Library(t.Context(), LibraryQuery{ViewerID: owner, Search: "It", Limit: 20})
+	if err != nil {
+		t.Fatalf("Library: %v", err)
+	}
+	// The probe: in title order the exact title is not on the page at all.
+	for _, item := range plain.Items {
+		if item.Title == "It" {
+			t.Fatal("title order kept It on the page; the probe no longer probes anything")
+		}
+	}
+
+	ranked, err := p.Library(t.Context(), LibraryQuery{ViewerID: owner, Search: "It", Limit: 20, ByTitleMatch: true})
+	if err != nil {
+		t.Fatalf("Library by title match: %v", err)
+	}
+	if len(ranked.Items) != 20 {
+		t.Fatalf("got %d items, want a full page of 20", len(ranked.Items))
+	}
+	if ranked.Items[0].Title != "It" || ranked.Items[1].Title != "Bring It On" {
+		t.Errorf("first two = %q, %q; want the exact title, then the whole word",
+			ranked.Items[0].Title, ranked.Items[1].Title)
+	}
+	if ranked.NextCursor != "" {
+		t.Error("a listing by title match offered a next page")
+	}
+	if _, err := p.Library(t.Context(), LibraryQuery{ViewerID: owner, Search: "It", ByTitleMatch: true,
+		Cursor: plain.NextCursor}); !errors.Is(err, store.ErrInvalidQuery) {
+		t.Errorf("a cursor on a title-match listing: err = %v", err)
+	}
+}
+
+// A search is for the text typed: % and _ are not patterns.
+func TestALibrarySearchMatchesPercentAndUnderscoreLiterally(t *testing.T) {
+	p := testPool(t)
+	cleanLibrary(t, p)
+	owner := seedLibrary(t, p, []struct{ title, author string }{
+		{"100% Recall", "A Writer"}, {"1000 Recipes", "A Cook"}, {"snake_case Style", "A Pythonist"}, {"snakescase", "Nobody"},
+	})
+	for search, want := range map[string]string{"100%": "100% Recall", "snake_case": "snake_case Style"} {
+		page, err := p.Library(t.Context(), LibraryQuery{ViewerID: owner, Search: search})
+		if err != nil {
+			t.Fatalf("Library %q: %v", search, err)
+		}
+		if len(page.Items) != 1 || page.Items[0].Title != want {
+			var got []string
+			for _, i := range page.Items {
+				got = append(got, i.Title)
+			}
+			t.Errorf("search %q found %q, want only %q", search, got, want)
+		}
+	}
+}
+
+func TestTitleKey(t *testing.T) {
+	for in, want := range map[string]string{
+		"The Adventures of Sherlock Holmes!": "adventures of sherlock holmes",
+		"  Dracula's   Guest ":               "dracula's guest",
+		"It":                                 "it",
+		"The":                                "the",
+		"A Habit of Mind 01":                 "habit of mind 01",
+	} {
+		if got := TitleKey(in); got != want {
+			t.Errorf("TitleKey(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

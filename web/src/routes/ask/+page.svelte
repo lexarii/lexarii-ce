@@ -4,7 +4,7 @@
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import * as api from '$api/client';
-	import { askFailure, blocks, segments, type AskFailure } from '$lib/answer';
+	import { askFailure, blocks, segments, withReadingList, type AskFailure } from '$lib/answer';
 	import { offersAsk } from '$lib/auth/capabilities';
 	import type { ChatMessage, ConversationSummary, Source } from '$api/client';
 
@@ -99,7 +99,11 @@
 		try {
 			const thread = await api.conversation(id);
 			conversationId = thread.id;
-			messages = thread.messages;
+			// A turn that answered with a reading list reads back as one,
+			// written exactly as it was when it arrived.
+			messages = thread.messages.map((m) =>
+				m.books?.length ? { ...m, content: withReadingList(m.content, m.books) } : m
+			);
 			error = null;
 			// A thread carries its own scope: the server pinned it when it was
 			// started and every later question inherits that, so the chip has to
@@ -229,6 +233,7 @@
 				model: answer.model,
 				retrievalMs: answer.retrievalMs,
 				generationMs: answer.generationMs,
+				scopedTo: answer.scopedTo,
 				citations: answer.sources,
 				createdAt: new Date().toISOString()
 			};
@@ -237,11 +242,7 @@
 			// than prose.
 			const latest = messages[answerIndex];
 			if (latest && answer.books.length > 0) {
-				const list = answer.books
-					.map((b) => `- ${b.title}${b.authors?.length ? ' — ' + b.authors.join(', ') : ''}`)
-					.join('\n');
-				latest.content =
-					(answer.answer ? answer.answer + '\n\n' : 'From your library:\n\n') + list;
+				latest.content = withReadingList(answer.answer, answer.books);
 			}
 
 			void loadThreads();
@@ -298,6 +299,10 @@
 
 	function timing(message: ChatMessage): string {
 		const parts: string[] = [];
+		// The question named a book and only that book was read. Said
+		// first, because it is what explains an answer that ignores the
+		// rest of the library.
+		if (message.scopedTo) parts.push(`searched only ${message.scopedTo.title}`);
 		if (message.retrievalMs) parts.push(`found in ${message.retrievalMs} ms`);
 		if (message.generationMs) parts.push(`answered in ${(message.generationMs / 1000).toFixed(1)} s`);
 		if (message.model) parts.push(message.model);
@@ -359,7 +364,7 @@
 		{#snippet inline(message: ChatMessage, text: string)}{#each segments(text) as part, n (n)}{#if part.cite !== null && sourceFor(message, part.cite)}{@const source = sourceFor(message, part.cite)!}<a
 			class="cite"
 			href={readerHref(source)}
-			title="{source.label || source.title}">{part.text}</a>{:else if part.bold}<strong>{part.text}</strong>{:else if part.code}<code>{part.text}</code>{:else}{part.text}{/if}{/each}{/snippet}
+			title="{source.label || source.title}">{part.text}</a>{:else if part.bold}<strong>{#if part.italic}<em>{part.text}</em>{:else}{part.text}{/if}</strong>{:else if part.code}<code>{part.text}</code>{:else if part.italic}<em>{part.text}</em>{:else}{part.text}{/if}{/each}{/snippet}
 
 	{#each messages as message, i (message.id)}
 			{#if message.role === 'user'}

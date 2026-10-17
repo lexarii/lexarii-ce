@@ -775,9 +775,19 @@ func (p *Pool) discardOne(ctx context.Context, hash string, discard func(StoredC
 // DeleteEmptyEditions deletes, of these editions, the ones no file belongs to
 // any more, and then the works left with no edition: what an erasure leaves
 // behind once it has committed. Best effort and separate from the erasure, so
-// it never waits on anything: an edition or work somebody is changing right
+// it never waits on a holding: an edition or work somebody is changing right
 // now is skipped, and stays as an invisible record nobody can open - which is
 // what an expired archive record has always left.
+//
+// A work's deletion reaches into conversations, which are other people's:
+// reading lists that named it lose the entry, answers that searched it lose
+// the scope (moveChatReferences). Those rows it does wait for, briefly, and a
+// conversation being deleted at that moment can make Postgres abort one of the
+// two as a deadlock - see "Works and conversations" in holdings.go. Here that
+// is the same outcome as a skipped work: the caller logs the error, and the
+// editions and works stay as invisible records. There is no retry: nothing in
+// this package retries on a deadlock, and a record nobody can open costs
+// nothing to keep.
 func (p *Pool) DeleteEmptyEditions(ctx context.Context, editions []uuid.UUID) error {
 	if len(editions) == 0 {
 		return nil
@@ -832,10 +842,30 @@ func (p *Pool) DeleteEmptyEditions(ctx context.Context, editions []uuid.UUID) er
 		if err != nil {
 			return fmt.Errorf("deleting empty works: %w", mapError(err))
 		}
+		// Which are empty, read once the works are held: an edition added
+		// now waits on the work's lock.
+		rows, err = tx.Query(ctx, `
+			SELECT w.id FROM works w
+			 WHERE w.id = ANY($1)
+			   AND NOT EXISTS (SELECT 1 FROM editions e WHERE e.work_id = w.id)
+			 ORDER BY w.id`, lockedWorks)
+		if err != nil {
+			return fmt.Errorf("deleting empty works: %w", mapError(err))
+		}
+		emptyWorks, err := pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+		if err != nil {
+			return fmt.Errorf("deleting empty works: %w", mapError(err))
+		}
+		// Anybody's conversations that named them, in the order a
+		// conversation's own deletion takes those rows. See "Works and
+		// conversations" in holdings.go.
+		if err := moveChatReferences(ctx, tx, emptyWorks, nil); err != nil {
+			return fmt.Errorf("deleting empty works: %w", err)
+		}
 		if _, err := tx.Exec(ctx, `
 			DELETE FROM works w
 			 WHERE w.id = ANY($1)
-			   AND NOT EXISTS (SELECT 1 FROM editions e WHERE e.work_id = w.id)`, lockedWorks); err != nil {
+			   AND NOT EXISTS (SELECT 1 FROM editions e WHERE e.work_id = w.id)`, emptyWorks); err != nil {
 			return fmt.Errorf("deleting empty works: %w", mapError(err))
 		}
 	}

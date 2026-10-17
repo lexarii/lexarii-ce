@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 
@@ -83,10 +84,42 @@ type LibraryQuery struct {
 	// because somebody about to share a book wants to see their own.
 	Owned Ownership
 
+	// ByTitleMatch orders a Search by how well each title matches it, best
+	// first: the title IS the search (TitleKey on both sides), then it
+	// contains the search as whole words, then everything else Search
+	// matched; Sort only breaks ties. For resolving a name to a book, where
+	// "It" must not be cut from a page of twenty titles that merely contain
+	// the letters. Not a sort somebody can ask for over HTTP, and a single
+	// page: a Cursor is refused.
+	ByTitleMatch bool
+
 	Sort   LibrarySort
 	Limit  int
 	Cursor string
 }
+
+// titleKeySQL is TitleKey in SQL, for the title of the work aliased w. The two
+// must agree, or a title Go grades as exact sorts after titles it does not.
+const titleKeySQL = `regexp_replace(btrim(regexp_replace(lower(w.title), '[^[:alnum:]'']+', ' ', 'g')),
+	'^(the|a|an) ', '')`
+
+// TitleKey is a title reduced to what identifies it: lower case, words of
+// letters, digits and apostrophes, single spaces, without a leading article.
+// "The Adventures of Sherlock Holmes!" and "adventures of sherlock holmes"
+// have the same key.
+func TitleKey(title string) string {
+	words := strings.FieldsFunc(strings.ToLower(title), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '\''
+	})
+	if len(words) > 1 && (words[0] == "the" || words[0] == "a" || words[0] == "an") {
+		words = words[1:]
+	}
+	return strings.Join(words, " ")
+}
+
+// likeEscaper makes text match itself in LIKE and ILIKE, whose default escape
+// character is the backslash.
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 
 // Ownership selects whose books a listing covers.
 type Ownership string
@@ -158,7 +191,9 @@ func (p *Pool) Library(ctx context.Context, q LibraryQuery) (LibraryPage, error)
 		// library. Comparing bare alphanumerics finds "linear algebra" inside
 		// "appliedlinearalgebraandoptimizationusingmatlab.pdf", which is
 		// otherwise completely unsearchable.
-		args = append(args, s, SearchKey(s))
+		// Escaped: a search is for the text typed, and "100%" or a name the
+		// router wrote with an underscore is not a pattern.
+		args = append(args, likeEscaper.Replace(s), SearchKey(s))
 		term, key := len(args)-1, len(args)
 		where = append(where, fmt.Sprintf(`(w.title ILIKE '%%' || $%[1]d || '%%'
 		      OR w.series ILIKE '%%' || $%[1]d || '%%'
@@ -191,6 +226,18 @@ func (p *Pool) Library(ctx context.Context, q LibraryQuery) (LibraryPage, error)
 	orderBy, cursorClause, cursorArgs, err := librarySortClauses(q.Sort, q.Cursor, len(args))
 	if err != nil {
 		return LibraryPage{}, err
+	}
+	byMatch := q.ByTitleMatch && strings.TrimSpace(q.Search) != ""
+	if byMatch {
+		if q.Cursor != "" {
+			return LibraryPage{}, fmt.Errorf("%w: a listing by title match is one page", store.ErrInvalidQuery)
+		}
+		// TitleKey keeps only letters, digits and apostrophes, so the key
+		// has nothing LIKE would read as a pattern.
+		args = append(args, TitleKey(q.Search))
+		orderBy = fmt.Sprintf(`CASE WHEN %[1]s = $%[2]d THEN 0
+		                           WHEN ' ' || %[1]s || ' ' LIKE '%% ' || $%[2]d || ' %%' THEN 1
+		                           ELSE 2 END, %[3]s`, titleKeySQL, len(args), orderBy)
 	}
 	if cursorClause != "" {
 		where = append(where, cursorClause)
@@ -327,7 +374,9 @@ func (p *Pool) Library(ctx context.Context, q LibraryQuery) (LibraryPage, error)
 	if len(page.Items) > limit {
 		page.Items = page.Items[:limit]
 		last := page.Items[len(page.Items)-1]
-		page.NextCursor = encodeCursor(q.Sort, last)
+		if !byMatch {
+			page.NextCursor = encodeCursor(q.Sort, last)
+		}
 	}
 
 	return page, nil

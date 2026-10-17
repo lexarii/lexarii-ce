@@ -101,8 +101,15 @@ import (
 //	                          claims, blocks, jobs); the files deleted; 9 deleted
 //	                          or marked failed
 //	DeleteEmptyEditions       editions, then works, FOR UPDATE SKIP LOCKED, then
-//	                          checked and deleted, after the erasure committed: no
-//	                          step here, and it waits on nothing
+//	                          checked; then anybody's messages naming the empty
+//	                          works, by id, then their message_works; then
+//	                          deleted. After the erasure committed: no step here,
+//	                          and it waits on no holding - see "Works and
+//	                          conversations" below for what it can wait on
+//	MergeWorks                no step here: the works (work_editors read), their
+//	                          editions moved; then messages and message_works as
+//	                          above, carried to the kept work; then the works
+//	                          deleted
 //	ReleaseHolding            3 account key-share; 1; 2/8 the file (archive, if last);
 //	                          5 release row; 6 claims; 7 holding; then their note shares
 //	RemoveBookFileForEveryone 3 administrator key-share; 3 every account it will
@@ -206,6 +213,26 @@ import (
 // unconditional account lock to addHolder would break it too: a path holding a
 // file's advisory lock would wait on an account whose deletion waits for that
 // lock.
+//
+// Works and conversations. Deleting a work (DeleteEmptyEditions, MergeWorks)
+// reaches into conversations, and they are anybody's: message_works rows
+// that listed the work, and messages.scoped_work_id on answers that searched
+// it. Left to the foreign keys, the cascade took message_works first and
+// messages second; deleting a conversation (or an account, through its
+// conversations) takes messages first and message_works second - so the two
+// could deadlock on a thread holding a reading list and a scoped answer.
+// moveChatReferences takes them in the conversation's order instead: the
+// messages first, by id, then message_works, and only then is the work
+// deleted, so its own cascade finds nothing left to lock.
+//
+// What remains is two orders over messages rows alone: by id here, in scan
+// order in a conversation's cascade. Postgres finds such a cycle and aborts
+// one side (40P01) rather than hanging. Neither side is half-done by it, and
+// none needs to be retried for correctness - nothing in this package retries
+// on a deadlock: a failed merge or conversation deletion is reported and can
+// simply be asked for again, and DeleteEmptyEditions is best effort, leaving
+// invisible records exactly as when it skips a locked work. None of this takes
+// an advisory lock or a holding, so it never joins a cycle with steps 1-9.
 
 // lockContentHash serialises everything that changes who holds one file, for
 // the rest of the transaction.

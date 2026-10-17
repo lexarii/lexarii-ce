@@ -280,9 +280,32 @@ func (h *ChatHandler) thread(r *http.Request, userID uuid.UUID, question string,
 
 	var history rag.History
 	for _, m := range conversation.Messages {
-		history = append(history, rag.Turn{Role: m.Role, Text: m.Text})
+		history = append(history, historyTurn(m))
 	}
 	return conversation, history, nil
+}
+
+// historyTurn is a stored turn as a follow-up is routed and answered with it:
+// the text, and the books it listed or cited, because a reading list has no
+// text at all and "the book" in the next question means one of them.
+func historyTurn(m postgres.Message) rag.Turn {
+	turn := rag.Turn{Role: m.Role, Text: rag.StoredListText(m.Text, len(m.Works))}
+	for _, w := range m.Works {
+		turn.Listed = append(turn.Listed, rag.WorkLabel(w.Title, w.Authors))
+	}
+	seen := map[uuid.UUID]bool{}
+	for _, c := range m.Citations {
+		// A cited book they can no longer open - lent and taken back, let
+		// go, archived - keeps its citation on their screen, where it is
+		// their own record of what was said; its title is not carried into
+		// the prompt for their next question.
+		if seen[c.WorkID] || c.WorkTitle == "" || !c.Readable {
+			continue
+		}
+		seen[c.WorkID] = true
+		turn.Cited = append(turn.Cited, c.WorkTitle)
+	}
+	return turn
 }
 
 // askBody reads and validates a question.
@@ -319,6 +342,17 @@ func assistantMessage(a rag.Answer) postgres.Message {
 		// An answer built from no passages is unsupported by definition, and
 		// recording that is how confabulation is caught later.
 		Unsupported: len(a.Passages) == 0 && a.Route.Intent.NeedsRetrieval(),
+	}
+
+	// The reading list, so the thread remembers what it was told and a
+	// follow-up can refer to it.
+	for _, b := range a.Books {
+		m.Works = append(m.Works, postgres.ListedWork{WorkID: b.WorkID, Title: b.Title, Authors: b.Authors})
+	}
+
+	if a.ScopedTo != nil {
+		m.ScopedTo = &postgres.ListedWork{WorkID: a.ScopedTo.WorkID, Title: a.ScopedTo.Title,
+			Authors: a.ScopedTo.Authors}
 	}
 
 	// Only what the answer actually cited is recorded as a citation. The rest
@@ -378,7 +412,7 @@ func conversationDTO(c postgres.Conversation) dto.Conversation {
 			ID:           m.ID.String(),
 			Seq:          m.Seq,
 			Role:         m.Role,
-			Content:      m.Text,
+			Content:      rag.StoredListText(m.Text, len(m.Works)),
 			Intent:       string(m.Intent),
 			Model:        m.ModelID,
 			RetrievalMS:  m.RetrievalMS,
@@ -415,6 +449,20 @@ func conversationDTO(c postgres.Conversation) dto.Conversation {
 				Locator:  c.Locator,
 				Excerpt:  excerpt(c.Excerpt),
 				Score:    c.Score,
+			})
+		}
+		if m.ScopedTo != nil {
+			message.ScopedTo = &dto.AnswerBook{
+				WorkID:  m.ScopedTo.WorkID.String(),
+				Title:   m.ScopedTo.Title,
+				Authors: m.ScopedTo.Authors,
+			}
+		}
+		for _, w := range m.Works {
+			message.Books = append(message.Books, dto.AnswerBook{
+				WorkID:  w.WorkID.String(),
+				Title:   w.Title,
+				Authors: w.Authors,
 			})
 		}
 		out.Messages = append(out.Messages, message)

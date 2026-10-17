@@ -224,6 +224,13 @@ type Answer struct {
 	// Books is the answer to a question that wanted books rather than passages.
 	Books []postgres.LibraryItem
 
+	// ScopedTo is the book the search was narrowed to because the question
+	// named it - "who are the villains in the book?", the book being the one
+	// just listed. Nil when the whole library was searched, and when the
+	// conversation was already pinned to a book: that is the caller's scope,
+	// not a decision made here. See namedBook for when a name is trusted.
+	ScopedTo *postgres.LibraryItem
+
 	// Notes is what this person wrote in the margins that bears on the
 	// question. Numbered after the passages and cited the same way, so a
 	// reader following [9] does not have to know which kind of thing it is.
@@ -247,7 +254,33 @@ type History []Turn
 type Turn struct {
 	Role string
 	Text string
+	// Listed is the reading list an assistant turn answered with, one entry
+	// per book as WorkLabel writes it. A find-book or broad-topic turn has
+	// its whole answer here and none in Text, so without it a follow-up -
+	// "who are the villains in the book?" - is routed against a thread that
+	// says "You answered:" and nothing after it.
+	Listed []string
+	// Cited is the titles of the books an assistant turn cited, once each, in
+	// the order first cited. An answer does not always name its book in the
+	// prose, and "the book" in the next question means this one.
+	Cited []string
 }
+
+// WorkLabel is how one book is named in the history: "Title — Author".
+func WorkLabel(title string, authors []string) string {
+	title = strings.TrimSpace(title)
+	if len(authors) == 0 {
+		return title
+	}
+	return title + " — " + strings.Join(authors, ", ")
+}
+
+// maxHistoryWorks bounds how many books one turn names in the history.
+//
+// A reading list is at most maxBooksInAnswer long, and an answer cites at most
+// a handful of books, so this is a guard rather than a trim. The rendered
+// lines count against maxHistoryChars like any other text.
+const maxHistoryWorks = 10
 
 // maxHistoryTurns bounds what is carried into a follow-up.
 //
@@ -277,11 +310,10 @@ func (h History) Render() string {
 	var parts []string
 	total := 0
 	for i := len(turns) - 1; i >= 0; i-- {
-		who := "They asked"
-		if turns[i].Role == "assistant" {
-			who = "You answered"
+		line := turns[i].render()
+		if line == "" {
+			continue
 		}
-		line := who + ": " + strings.TrimSpace(turns[i].Text)
 		if total+len(line) > maxHistoryChars && len(parts) > 0 {
 			break
 		}
@@ -289,6 +321,48 @@ func (h History) Render() string {
 		total += len(line)
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+// render writes one turn, or nothing for an assistant turn with nothing in it.
+//
+//	They asked: what other sherlock books are there?
+//	You listed: The Adventures of Sherlock Holmes — Arthur Conan Doyle
+//
+//	They asked: who are the villains in the book?
+//	You answered: Moriarty, chiefly [1].
+//	You cited: The Adventures of Sherlock Holmes
+func (t Turn) render() string {
+	text := strings.TrimSpace(t.Text)
+	if t.Role != "assistant" {
+		return "They asked: " + text
+	}
+
+	var lines []string
+	if text != "" {
+		lines = append(lines, "You answered: "+text)
+	}
+	if cited := firstWorks(t.Cited); cited != "" {
+		lines = append(lines, "You cited: "+cited)
+	}
+	if listed := firstWorks(t.Listed); listed != "" {
+		lines = append(lines, "You listed: "+listed)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// firstWorks joins up to maxHistoryWorks names, skipping blanks.
+func firstWorks(names []string) string {
+	kept := make([]string, 0, min(len(names), maxHistoryWorks))
+	for _, n := range names {
+		if n = strings.TrimSpace(n); n == "" {
+			continue
+		}
+		kept = append(kept, n)
+		if len(kept) == maxHistoryWorks {
+			break
+		}
+	}
+	return strings.Join(kept, "; ")
 }
 
 // Ask routes a question, retrieves for it, and answers from what it found.
@@ -318,7 +392,7 @@ func (a *Answerer) Retrieve(ctx context.Context, question string, scope Scope) (
 		return route, nil, nil
 	}
 
-	passages, err := a.retrieve(ctx, question, route, scope)
+	passages, _, err := a.retrieveNamed(ctx, question, route, scope)
 	return route, passages, err
 }
 
@@ -383,6 +457,11 @@ func (a *Answerer) ask(ctx context.Context, question string, scope Scope, histor
 		// Searching everything and citing what is found is the honest fallback.
 		route = llm.FallbackRoute(question)
 	}
+	if len(history) > 0 {
+		// Only a follow-up can inherit a book it does not mean: a first
+		// question has nothing earlier to copy one from.
+		route.Book = keepFollowUpBook(route.Book, question)
+	}
 	out.Route = route
 	out.RetrievalMS = routingMS
 
@@ -394,6 +473,20 @@ func (a *Answerer) ask(ctx context.Context, question string, scope Scope, histor
 		case domain.IntentFindBook, domain.IntentBroadTopic:
 			start := time.Now()
 			books, err := a.findBooks(ctx, question, route, scope)
+			if err == nil && len(books) == 0 {
+				// No subject and no title matched - in a library that
+				// was never enriched, no work has a subject at all - so
+				// the books are found by what is in them instead. Not in
+				// a thread pinned to one book: its passages can only name
+				// that book, which is not a reading list.
+				if scope.BookFileID == nil {
+					books, err = a.booksFromText(ctx, question, route, scope)
+				}
+				out.Text = NoReadingList
+				if len(books) > 0 {
+					out.Text = FoundByText
+				}
+			}
 			out.RetrievalMS += int(time.Since(start).Milliseconds())
 			if err != nil {
 				return out, err
@@ -418,11 +511,12 @@ func (a *Answerer) ask(ctx context.Context, question string, scope Scope, histor
 	}
 
 	start := time.Now()
-	passages, err := a.retrieve(ctx, question, route, scope)
+	passages, named, err := a.retrieveNamed(ctx, question, route, scope)
 	out.RetrievalMS += int(time.Since(start).Milliseconds())
 	if err != nil {
 		return out, err
 	}
+	out.ScopedTo = named
 	// Trimmed to the model's window BEFORE anybody is shown them, so that the
 	// sources on the screen are the sources the answer was written from. A
 	// passage the model never received is not a source.
@@ -567,14 +661,17 @@ func (a *Answerer) findBooks(ctx context.Context, question string, route llm.Rou
 	}
 
 	// Then by title and author, which catches a question that names a book.
-	search := route.Book
+	search := bareTitle(route.Book)
 	if search == "" {
 		search = route.Query(question)
 	}
 	page, err := a.Store.Library(ctx, postgres.LibraryQuery{
 		ViewerID: scope.UserID,
 		Search:   search,
-		Limit:    maxBooksInAnswer,
+		// The book a question names first, not whichever eight titles
+		// containing it come first alphabetically.
+		ByTitleMatch: true,
+		Limit:        maxBooksInAnswer,
 	})
 	if err != nil {
 		return nil, err
@@ -817,8 +914,12 @@ func (a *Answerer) retrieveOne(ctx context.Context, text string, scope Scope, li
 
 	// Reranking reads a deeper pool than the answer needs, because it can only
 	// reorder what it is handed.
+	//
+	// Never shallower than what was asked for: a reading list ranked from
+	// the text reads textPool passages, more than RerankPool, and a pool cut
+	// to twenty could only ever hand back twenty.
 	if a.Reranker != nil {
-		query.Limit = RerankPool
+		query.Limit = max(RerankPool, limit)
 	}
 
 	found, err := a.Store.Search(ctx, query)

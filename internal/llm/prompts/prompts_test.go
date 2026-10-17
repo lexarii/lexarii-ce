@@ -147,3 +147,33 @@ func TestEveryPromptHasBothHalves(t *testing.T) {
 		}
 	}
 }
+
+// The router as a follow-up meets it: the conversation, then the question. The
+// whole rendered text is the thing worth reviewing when it changes, because
+// the rules about which book a follow-up means and which it must not inherit
+// are prose, and they only work in the context they are read in.
+func TestRouteForAFollowUp(t *testing.T) {
+	tmpl, err := Route(RouteInput{Question: "They asked: what other sherlock books are there in my library?\n\n" +
+		"You listed: The Adventures of Sherlock Holmes — Arthur Conan Doyle\n\n" +
+		"They asked: who are the villians in the book?"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if tmpl.ID() != "route/"+RouteVersion {
+		t.Errorf("ID = %q", tmpl.ID())
+	}
+	golden(t, "route_follow_up", rendered(t, tmpl))
+
+	// The three rules the thread above depends on, so that a later version
+	// that drops one fails here and not in somebody's library.
+	for _, rule := range []string{
+		"Classify only the LAST thing they asked",
+		"ONLY when the last question refers back to it",
+		"never inherits a book from earlier",
+		`correct obvious misspellings ("villians" is "villains")`,
+	} {
+		if !strings.Contains(tmpl.System, rule) {
+			t.Errorf("the router is not told: %s", rule)
+		}
+	}
+}

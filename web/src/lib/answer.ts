@@ -21,7 +21,7 @@ export type Block = { kind: 'p'; text: string } | { kind: 'ul'; items: string[] 
  * answer already stored would still be full of asterisks.
  *
  * This handles what the model actually produces - paragraphs, bullets,
- * bold, and code spans - and nothing else. It is not a markdown parser and
+ * bold, italics, and code spans - and nothing else. It is not a markdown parser and
  * should not grow into one; anything it does not recognise stays as the
  * text it already was, which is the same behaviour as before.
  */
@@ -45,8 +45,11 @@ export function blocks(content: string): Block[] {
 	// is here to fix.
 	let prose: string[] = [];
 	let items: string[] = [];
+	// Wrapped lines of one paragraph are joined with the newline kept. In a
+	// paragraph it renders as the space it always did; kept, it is the line
+	// break an italic must not run across.
 	const flush = () => {
-		if (prose.length > 0) out.push({ kind: 'p', text: prose.join(' ') });
+		if (prose.length > 0) out.push({ kind: 'p', text: prose.join('\n') });
 		if (items.length > 0) out.push({ kind: 'ul', items });
 		prose = [];
 		items = [];
@@ -61,7 +64,7 @@ export function blocks(content: string): Block[] {
 		if (bullet.test(line)) {
 			// A paragraph above the list ends where the list starts.
 			if (prose.length > 0) {
-				out.push({ kind: 'p', text: prose.join(' ') });
+				out.push({ kind: 'p', text: prose.join('\n') });
 				prose = [];
 			}
 			items.push(line.replace(bullet, ''));
@@ -79,29 +82,71 @@ export function blocks(content: string): Block[] {
 	return out.length > 0 ? out : [{ kind: 'p', text: content }];
 }
 
-/** One run of text, possibly a citation marker, bold, or a code span. */
-export type Piece = { text: string; cite: number | null; bold?: boolean; code?: boolean };
+/** One run of text, possibly a citation marker, bold, italic, or a code span. */
+export type Piece = {
+	text: string;
+	cite: number | null;
+	bold?: boolean;
+	italic?: boolean;
+	code?: boolean;
+};
+
+/**
+ * An italic: one pair of `*` or `_` around text, on one line.
+ *
+ * Strict on purpose, because both characters mean other things in an answer:
+ *
+ * - The text starts and ends with a non-space, so "2 * 3 * 4" and a bullet's
+ *   "* " are not emphasis.
+ * - Neither marker touches a letter or digit on its outer side, so "2*3*4"
+ *   and "snake_case_name" are not either. (Markdown allows `*` inside a
+ *   word; the arithmetic it would break is commoner in answers than the
+ *   emphasis it would allow.)
+ * - The inside holds no marker of its own kind and no line break, so one
+ *   stray asterisk cannot italicise the rest of a paragraph, and a pair is
+ *   never nested.
+ *
+ * No lookbehind: Safari before 16.4 cannot parse one, and the regular
+ * expression is built for every answer, so it failed every answer on those
+ * phones. What comes before the opening marker is captured instead - the
+ * start, or a character that is not a letter, digit or the marker - and
+ * handed back as text. The cost: an italic straight after something else
+ * this pass took ("[2]*x*") has no character left to capture and stays as
+ * written.
+ */
+const starItalic = String.raw`(^|[^\p{L}\p{N}*])\*(?![\s*])([^*\n]*?[^\s*])\*(?![\p{L}\p{N}*])`;
+const underscoreItalic = String.raw`(^|[^\p{L}\p{N}_])_(?![\s_])([^_\n]*?[^\s_])_(?![\p{L}\p{N}_])`;
 
 /**
  * Splits a line into pieces the template can render.
  *
- * Citation markers become links, `**text**` becomes bold, `` `text` ``
- * becomes code. Everything is rendered as a TEXT node - never with @html -
- * because this is a language model's output rendered in somebody's
- * browser, and the one thing that must not be possible is markup in an
- * answer becoming markup on the page.
+ * Citation markers become links, `**text**` becomes bold, `*text*` and
+ * `_text_` become italic, `` `text` `` becomes code. Everything is rendered
+ * as a TEXT node - never with @html - because this is a language model's
+ * output rendered in somebody's browser, and the one thing that must not be
+ * possible is markup in an answer becoming markup on the page.
  */
 export function segments(content: string): Piece[] {
 	const out: Piece[] = [];
-	// Citations, bold, and code spans, in one pass so their boundaries
-	// cannot overlap into nonsense.
-	const pattern = /\[(\d{1,3})\]|\*\*([^*]+)\*\*|`([^`]+)`/g;
+	// Citations, bold, code spans and italics, in one pass so their
+	// boundaries cannot overlap into nonsense. Bold comes before the
+	// italics, so "**a**" is bold and never an italic "*a*" in asterisks.
+	// Code before the italics too: an italic's match starts one character
+	// early, at the character before its marker, so "`_x_`" would otherwise
+	// be read as an italic beginning at the backtick.
+	const pattern = new RegExp(
+		String.raw`\[(\d{1,3})\]|\*\*([^*]+)\*\*|` + '`([^`]+)`' + `|${starItalic}|${underscoreItalic}`,
+		'gu'
+	);
 
 	let last = 0;
 	let match: RegExpExecArray | null;
 	while ((match = pattern.exec(content)) !== null) {
-		if (match.index > last) out.push({ text: content.slice(last, match.index), cite: null });
-		const [, cite, bold, code] = match;
+		const [, cite, bold, code, starLead, star, underscoreLead, underscore] = match;
+		// An italic's match begins with the character before its marker,
+		// which is ordinary text.
+		const start = match.index + (starLead ?? underscoreLead ?? '').length;
+		if (start > last) out.push({ text: content.slice(last, start), cite: null });
 		if (cite !== undefined) {
 			out.push({ text: match[0], cite: Number(cite) });
 		} else if (bold !== undefined) {
@@ -110,6 +155,10 @@ export function segments(content: string): Piece[] {
 			// inside again keeps the chip. It cannot recurse further: the bold
 			// pattern excludes asterisks, so the inside holds no more bold.
 			for (const piece of segments(bold)) out.push({ ...piece, bold: true });
+		} else if (star !== undefined || underscore !== undefined) {
+			// Split again for the same reason: "*see [2]*" keeps its chip.
+			// The inside has no marker of its own kind, so this ends.
+			for (const piece of segments(star ?? underscore ?? '')) out.push({ ...piece, italic: true });
 		} else if (code !== undefined) {
 			out.push({ text: code, cite: null, code: true });
 		}
@@ -117,6 +166,24 @@ export function segments(content: string): Piece[] {
 	}
 	if (last < content.length) out.push({ text: content.slice(last), cite: null });
 	return out;
+}
+
+/** One book in a reading list, as the answer and a stored turn both carry it. */
+export type ListedBook = { title: string; authors?: string[] };
+
+/**
+ * The text of a turn that answered with books.
+ *
+ * A reading list arrives as books rather than prose. The same text is built
+ * for an answer as it arrives and for a turn read back from a reopened
+ * thread, so the two cannot drift apart.
+ */
+export function withReadingList(answer: string, books: ListedBook[] | undefined): string {
+	if (!books || books.length === 0) return answer;
+	const list = books
+		.map((b) => `- ${b.title}${b.authors?.length ? ' — ' + b.authors.join(', ') : ''}`)
+		.join('\n');
+	return (answer ? answer + '\n\n' : 'From your library:\n\n') + list;
 }
 
 /** What a question that could not be answered should say. */

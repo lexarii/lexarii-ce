@@ -90,6 +90,8 @@ data class Answer(
     val sources: List<Source>,
     /** Books answers a question that wanted a reading list rather than a synthesis: "what should I read about X". Empty for other intents. */
     val books: List<AnswerBook>,
+    /** ScopedTo is the one book that was searched, when the question named it - "who are the villains in the book?" after a list of one. Absent when the whole library was searched, including when the name matched no book or several, and when the thread is pinned to a book already. */
+    val scopedTo: AnswerBook? = null,
     val model: String? = null,
     val promptId: String? = null,
     val retrievalMs: Int,
@@ -636,6 +638,10 @@ data class Message(
     /** Unsupported marks an answer given with no passages behind it. */
     val unsupported: Boolean? = null,
     val citations: List<Source>,
+    /** Books is the reading list a turn answered with, for a question that wanted books rather than an answer. Only books the reader may still open are listed. */
+    val books: List<AnswerBook>? = null,
+    /** ScopedTo is the one book this turn searched because the question named it, as on Answer. Absent once the reader may no longer open that book. */
+    val scopedTo: AnswerBook? = null,
     val createdAt: String
 )
 

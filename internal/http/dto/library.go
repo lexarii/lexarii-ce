@@ -358,6 +358,11 @@ type Answer struct {
 	// Books answers a question that wanted a reading list rather than a
 	// synthesis: "what should I read about X". Empty for other intents.
 	Books []AnswerBook `json:"books"`
+	// ScopedTo is the one book that was searched, when the question named it
+	// - "who are the villains in the book?" after a list of one. Absent when
+	// the whole library was searched, including when the name matched no
+	// book or several, and when the thread is pinned to a book already.
+	ScopedTo *AnswerBook `json:"scopedTo,omitempty"`
 
 	Model        string `json:"model,omitempty"`
 	PromptID     string `json:"promptId,omitempty"`
@@ -397,8 +402,15 @@ type Message struct {
 	// Unsupported marks an answer given with no passages behind it.
 	Unsupported bool `json:"unsupported,omitempty"`
 
-	Citations []Source  `json:"citations"`
-	CreatedAt time.Time `json:"createdAt"`
+	Citations []Source `json:"citations"`
+	// Books is the reading list a turn answered with, for a question that
+	// wanted books rather than an answer. Only books the reader may still
+	// open are listed.
+	Books []AnswerBook `json:"books,omitempty"`
+	// ScopedTo is the one book this turn searched because the question named
+	// it, as on Answer. Absent once the reader may no longer open that book.
+	ScopedTo  *AnswerBook `json:"scopedTo,omitempty"`
+	CreatedAt time.Time   `json:"createdAt"`
 }
 
 // Conversation is a thread and its turns.

@@ -87,6 +87,14 @@ func answerDTO(a rag.Answer) dto.Answer {
 		})
 	}
 
+	if a.ScopedTo != nil {
+		out.ScopedTo = &dto.AnswerBook{
+			WorkID:  a.ScopedTo.WorkID.String(),
+			Title:   a.ScopedTo.Title,
+			Authors: a.ScopedTo.Authors,
+		}
+	}
+
 	out.Sources = sourcesDTO(a.Passages, a.Cited)
 	// The reader's own notes come after the passages in the same numbering the
 	// answer cites.

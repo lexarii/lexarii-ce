@@ -143,7 +143,17 @@ type RouteInput struct {
 // compares Scrum, Kanban and XP and could simply have answered. Refusing to
 // synthesise is right for "tell me about mathematics" and wrong for a question
 // somebody could reply to in a paragraph.
-const RouteVersion = "v3"
+//
+// v4 is about follow-ups. A follow-up is routed with the conversation before
+// it, and v3 said nothing about that, so in a real thread "who are the
+// villians in the book?" after a list holding only The Adventures of Sherlock
+// Holmes came back with no book, and was answered from Dracula and Alice. Then
+// "what is a good romantic book?" came back with the earlier book still
+// attached, and the reading list was Sherlock Holmes again. v4 says to
+// classify only the last question, to take a book from the conversation only
+// when that question refers back to one, and to spell out what "it" means and
+// correct obvious misspellings in a search.
+const RouteVersion = "v4"
 
 // Route builds the prompt that decides what kind of question was asked.
 func Route(in RouteInput) (Template, error) {

@@ -8,12 +8,16 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
+	"scm.poniatowski.dev/adam/lexarii/internal/domain"
+	"scm.poniatowski.dev/adam/lexarii/internal/llm"
+	"scm.poniatowski.dev/adam/lexarii/internal/rag"
 	"scm.poniatowski.dev/adam/lexarii/internal/store/postgres"
 )
 
@@ -211,5 +215,103 @@ func TestAReopenedThreadCitesTheRightSource(t *testing.T) {
 	}
 	if _, exists := numbers[1]; exists {
 		t.Error("[1] resolves to something, but the answer never cited a first passage")
+	}
+}
+
+// A reading list is kept with the turn that gave it, and a follow-up is routed
+// with it. A find-book turn has no text, so without the list the thread said
+// "You answered:" and nothing more, and "the book" in the next question meant
+// nothing.
+func TestAReadingListReachesTheNextQuestion(t *testing.T) {
+	holmes := uuid.New()
+	answer := rag.Answer{
+		Route: llm.Route{Intent: domain.IntentFindBook},
+		Books: []postgres.LibraryItem{{WorkID: holmes, Title: "The Adventures of Sherlock Holmes",
+			Authors: []string{"Arthur Conan Doyle"}}},
+	}
+
+	stored := assistantMessage(answer)
+	if len(stored.Works) != 1 || stored.Works[0].WorkID != holmes {
+		t.Fatalf("stored works = %+v, want the listed book", stored.Works)
+	}
+
+	turn := historyTurn(stored)
+	if want := []string{"The Adventures of Sherlock Holmes — Arthur Conan Doyle"}; !reflect.DeepEqual(turn.Listed, want) {
+		t.Errorf("Listed = %q, want %q", turn.Listed, want)
+	}
+	if got := (rag.History{turn}).Render(); got != "You listed: The Adventures of Sherlock Holmes — Arthur Conan Doyle" {
+		t.Errorf("rendered %q", got)
+	}
+
+	// And a reopened thread shows the list, not an empty answer.
+	read := conversationDTO(postgres.Conversation{Messages: []postgres.Message{stored}})
+	if books := read.Messages[0].Books; len(books) != 1 || books[0].WorkID != holmes.String() ||
+		books[0].Title != "The Adventures of Sherlock Holmes" {
+		t.Errorf("reopened books = %+v", books)
+	}
+}
+
+// The books an answer cited are named once each, in the order first cited,
+// so "the book" can be resolved even when the prose never names it.
+func TestAHistoryTurnNamesWhatItCited(t *testing.T) {
+	holmes, dracula := uuid.New(), uuid.New()
+	turn := historyTurn(postgres.Message{Role: "assistant", Text: "Moriarty [1], and the Count [2].",
+		Citations: []postgres.Citation{
+			{WorkID: holmes, WorkTitle: "The Adventures of Sherlock Holmes", Readable: true},
+			{WorkID: dracula, WorkTitle: "Dracula", Readable: true},
+			{WorkID: holmes, WorkTitle: "The Adventures of Sherlock Holmes", Readable: true},
+			// Lent and taken back: still their citation, never in the prompt.
+			{WorkID: uuid.New(), WorkTitle: "Somebody Else's Book"},
+		}})
+	if want := []string{"The Adventures of Sherlock Holmes", "Dracula"}; !reflect.DeepEqual(turn.Cited, want) {
+		t.Errorf("Cited = %q, want %q", turn.Cited, want)
+	}
+	if turn.Text != "Moriarty [1], and the Count [2]." || len(turn.Listed) != 0 {
+		t.Errorf("turn = %+v", turn)
+	}
+}
+
+// Where an answer looked is part of the answer: on the reply, in what is
+// stored, and on the turn when the thread is reopened.
+func TestTheBookAnAnswerSearchedIsShown(t *testing.T) {
+	holmes := uuid.New()
+	answer := rag.Answer{
+		Route:    llm.Route{Intent: domain.IntentFactualLookup},
+		Text:     "Moriarty [1].",
+		ScopedTo: &postgres.LibraryItem{WorkID: holmes, Title: "The Adventures of Sherlock Holmes"},
+	}
+
+	if got := answerDTO(answer).ScopedTo; got == nil || got.WorkID != holmes.String() ||
+		got.Title != "The Adventures of Sherlock Holmes" {
+		t.Errorf("answer scopedTo = %+v", got)
+	}
+	stored := assistantMessage(answer)
+	if stored.ScopedTo == nil || stored.ScopedTo.WorkID != holmes {
+		t.Fatalf("stored scope = %+v", stored.ScopedTo)
+	}
+	read := conversationDTO(postgres.Conversation{Messages: []postgres.Message{stored}})
+	if got := read.Messages[0].ScopedTo; got == nil || got.WorkID != holmes.String() {
+		t.Errorf("reopened scopedTo = %+v", got)
+	}
+
+	// The whole library: nothing to say.
+	if got := answerDTO(rag.Answer{Text: "x"}).ScopedTo; got != nil {
+		t.Errorf("an unscoped answer says %+v", got)
+	}
+}
+
+// A text-found list whose every book has since left the shelf reads as a
+// sentence, not as a colon introducing nothing.
+func TestAnEmptiedTextReadingListSaysSo(t *testing.T) {
+	m := postgres.Message{Role: "assistant", Intent: domain.IntentFindBook, Text: rag.FoundByText}
+	if got := conversationDTO(postgres.Conversation{Messages: []postgres.Message{m}}).Messages[0].Content; got != rag.NoLongerListed {
+		t.Errorf("reopened content = %q", got)
+	}
+	if got := historyTurn(m).Text; got != rag.NoLongerListed {
+		t.Errorf("history text = %q", got)
+	}
+	m.Works = []postgres.ListedWork{{WorkID: uuid.New(), Title: "Pride and Prejudice"}}
+	if got := conversationDTO(postgres.Conversation{Messages: []postgres.Message{m}}).Messages[0].Content; got != rag.FoundByText {
+		t.Errorf("content with a book left = %q", got)
 	}
 }

@@ -131,7 +131,7 @@ Asynchronous work: `scan`, `extract`, `enrich`, `chunk`, `embed`.
 The chat surface.
 
 - A **Conversation** scopes a thread, optionally to a Collection or a set of Works.
-- A **Message** is a turn. An assistant Message holds the routed `intent`, the retrieved Chunk ids, and the token budget used.
+- A **Message** is a turn. An assistant Message holds the routed `intent`, the retrieved Chunk ids, the token budget used, and - for a find-book or broad-topic turn - the reading list it answered with, as references to Works read back through `readable_works`.
 - A **Citation** links a Message to a Chunk and therefore to a Locator, which is what makes "jump to this passage in the book" work. Citations are the trust mechanism of the whole feature — an assistant claim without one is a defect.
 
 ---
@@ -143,7 +143,7 @@ The router classifies every question before retrieving anything. This is what ke
 | Intent | Meaning | Behaviour |
 |---|---|---|
 | `factual-lookup` | "What does Knuth say about loop invariants?" | Scope by subject, hybrid retrieve, rerank, answer with citations |
-| `find-book` | "Which of my books covers category theory?" | Search Work-level metadata and summaries; return titles, do **not** synthesise an answer |
+| `find-book` | "Which of my books covers category theory?" | Search Work-level metadata and summaries; return titles, do **not** synthesise an answer. With no subject or title match, rank Works by their passages on the topic, and say so |
 | `summarise-book` | "Summarise chapter 3 of X" | Scoped to one BookFile; structural retrieval, not similarity search |
 | `broad-topic` | "Tell me about physics" | Too wide to answer — return a reading list and offer to narrow |
 | `metadata` | "How many unread books do I have?" | Pure SQL. Retrieve nothing, embed nothing |

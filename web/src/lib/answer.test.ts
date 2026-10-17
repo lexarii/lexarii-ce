@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { describe, expect, it } from 'vitest';
-import { askFailure, blocks, segments, UNREACHABLE } from './answer';
+import { askFailure, blocks, segments, UNREACHABLE, withReadingList } from './answer';
 import { ApiError } from '$api/client';
+import answerSource from './answer.ts?raw';
 
 describe('blocks', () => {
 	it('keeps a plain answer as one paragraph', () => {
@@ -18,11 +19,13 @@ describe('blocks', () => {
 		]);
 	});
 
-	it('joins a wrapped paragraph into one line', () => {
+	it('joins a wrapped paragraph into one paragraph', () => {
 		// A single newline inside a paragraph is the model wrapping, not a
-		// break it meant. Rendering it as a break made answers ragged.
+		// break it meant. Rendering it as a break made answers ragged. The
+		// newline is kept - inside a paragraph it renders as a space - so
+		// an italic can tell where a line ended.
 		expect(blocks('One sentence\nand its continuation.')).toEqual([
-			{ kind: 'p', text: 'One sentence and its continuation.' }
+			{ kind: 'p', text: 'One sentence\nand its continuation.' }
 		]);
 	});
 
@@ -36,7 +39,7 @@ describe('blocks', () => {
 		// Every line has to be a bullet. Otherwise a sentence beginning with
 		// emphasis loses the rest of itself.
 		expect(blocks('*Emphasis* opens this one\nand the line after is prose.')).toEqual([
-			{ kind: 'p', text: '*Emphasis* opens this one and the line after is prose.' }
+			{ kind: 'p', text: '*Emphasis* opens this one\nand the line after is prose.' }
 		]);
 	});
 
@@ -88,6 +91,110 @@ describe('segments', () => {
 		expect(segments('**Scope [2]**')).toEqual([
 			{ text: 'Scope ', cite: null, bold: true },
 			{ text: '[2]', cite: 2, bold: true }
+		]);
+	});
+});
+
+describe('segments, italics', () => {
+	it('unwraps an asterisk pair and an underscore pair', () => {
+		expect(segments('It is *not* the count, it is _Jonathan_.')).toEqual([
+			{ text: 'It is ', cite: null },
+			{ text: 'not', cite: null, italic: true },
+			{ text: ' the count, it is ', cite: null },
+			{ text: 'Jonathan', cite: null, italic: true },
+			{ text: '.', cite: null }
+		]);
+	});
+
+	it('italicises a title of several words, and a single letter', () => {
+		expect(segments('*Pride and Prejudice* and *x*')).toEqual([
+			{ text: 'Pride and Prejudice', cite: null, italic: true },
+			{ text: ' and ', cite: null },
+			{ text: 'x', cite: null, italic: true }
+		]);
+	});
+
+	it('keeps a citation clickable inside an italic', () => {
+		expect(segments('*see [2]*')).toEqual([
+			{ text: 'see ', cite: null, italic: true },
+			{ text: '[2]', cite: 2, italic: true }
+		]);
+	});
+
+	it('keeps bold as bold, and an italic inside it', () => {
+		expect(segments('**Scope** and **the _Count_**')).toEqual([
+			{ text: 'Scope', cite: null, bold: true },
+			{ text: ' and ', cite: null },
+			{ text: 'the ', cite: null, bold: true },
+			{ text: 'Count', cite: null, italic: true, bold: true }
+		]);
+	});
+
+	it('does not read arithmetic as emphasis', () => {
+		for (const sum of ['2*3*4', '2 * 3 * 4', 'a*b + c*d', '(2*3)*4', '5 * x*y']) {
+			expect(segments(sum)).toEqual([{ text: sum, cite: null }]);
+		}
+	});
+
+	it('does not read an underscore inside a word as emphasis', () => {
+		for (const name of ['snake_case_name', 'call do_this_now', '__init__', 'a_b_']) {
+			expect(segments(name)).toEqual([{ text: name, cite: null }]);
+		}
+	});
+
+	it('does not read a bullet marker as emphasis', () => {
+		expect(segments('* Core concept * and more')).toEqual([
+			{ text: '* Core concept * and more', cite: null }
+		]);
+	});
+
+	it('does not run an italic across a line break', () => {
+		const text = 'the *first\nsecond* line';
+		expect(segments(text)).toEqual([{ text, cite: null }]);
+		// And blocks keeps the break for it to see.
+		expect(blocks(text)).toEqual([{ kind: 'p', text }]);
+	});
+
+	it('takes one pair at a time, never nesting', () => {
+		expect(segments('*a* b *c*')).toEqual([
+			{ text: 'a', cite: null, italic: true },
+			{ text: ' b ', cite: null },
+			{ text: 'c', cite: null, italic: true }
+		]);
+		expect(segments('**')).toEqual([{ text: '**', cite: null }]);
+		expect(segments('* *')).toEqual([{ text: '* *', cite: null }]);
+	});
+
+	it('leaves an unclosed italic as the text it already was', () => {
+		// Arrives constantly while streaming.
+		expect(segments('*half')).toEqual([{ text: '*half', cite: null }]);
+		expect(segments('_half')).toEqual([{ text: '_half', cite: null }]);
+	});
+
+	it('hands the character before an italic back as text', () => {
+		expect(segments('(*a*) "_b_"')).toEqual([
+			{ text: '(', cite: null },
+			{ text: 'a', cite: null, italic: true },
+			{ text: ') "', cite: null },
+			{ text: 'b', cite: null, italic: true },
+			{ text: '"', cite: null }
+		]);
+		expect(segments('*a* *b*')).toEqual([
+			{ text: 'a', cite: null, italic: true },
+			{ text: ' ', cite: null },
+			{ text: 'b', cite: null, italic: true }
+		]);
+	});
+
+	it('uses no lookbehind, which Safari before 16.4 cannot parse', () => {
+		expect(answerSource).not.toMatch(/\(\?<[=!]/);
+	});
+
+	it('does not look for emphasis inside code', () => {
+		expect(segments('`a*b*c` and `_x_`')).toEqual([
+			{ text: 'a*b*c', cite: null, code: true },
+			{ text: ' and ', cite: null },
+			{ text: '_x_', cite: null, code: true }
 		]);
 	});
 });
@@ -148,5 +255,26 @@ describe('askFailure', () => {
 		});
 		expect(askFailure(new Error('network down'))).toEqual({ message: 'network down', busy: false });
 		expect(askFailure('odd')).toEqual({ message: 'odd', busy: false });
+	});
+});
+
+describe('withReadingList', () => {
+	const holmes = { title: 'The Adventures of Sherlock Holmes', authors: ['Arthur Conan Doyle'] };
+
+	it('leaves an answer with no books alone', () => {
+		expect(withReadingList('Moriarty [1].', undefined)).toBe('Moriarty [1].');
+		expect(withReadingList('Moriarty [1].', [])).toBe('Moriarty [1].');
+	});
+
+	it('introduces a bare list', () => {
+		expect(withReadingList('', [holmes, { title: 'Untitled' }])).toBe(
+			'From your library:\n\n- The Adventures of Sherlock Holmes — Arthur Conan Doyle\n- Untitled'
+		);
+	});
+
+	it('keeps what the answer said above the list', () => {
+		expect(withReadingList('Found from their text:', [holmes])).toBe(
+			'Found from their text:\n\n- The Adventures of Sherlock Holmes — Arthur Conan Doyle'
+		);
 	});
 });

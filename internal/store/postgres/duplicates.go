@@ -252,6 +252,9 @@ func (p *Pool) duplicateWorks(ctx context.Context, viewer uuid.UUID, ids []uuid.
 //
 // Only works the person may edit (work_editors), on both sides. Merging is destructive
 // and a borrowed book is not theirs to fold into anything.
+//
+// Conversations are carried over too (moveChatReferences), and those can be
+// anybody's: see "Works and conversations" in holdings.go for the lock order.
 func (p *Pool) MergeWorks(ctx context.Context, userID, keep uuid.UUID, merge []uuid.UUID) (int, error) {
 	if len(merge) == 0 {
 		return 0, nil
@@ -319,6 +322,14 @@ func (p *Pool) MergeWorks(ctx context.Context, userID, keep uuid.UUID, merge []u
 		keep, merge)
 	if err != nil {
 		return 0, fmt.Errorf("moving the files over: %w", mapError(err))
+	}
+
+	// What conversations said about the merged copies - a reading list that
+	// named one, an answer that searched one - now says it about the kept
+	// work, everybody's conversations included: the book is the same book.
+	keepID := keep
+	if err := moveChatReferences(ctx, tx, merge, &keepID); err != nil {
+		return 0, err
 	}
 
 	// The emptied works. Their editions are gone, so nothing cascades to a

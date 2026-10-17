@@ -167,3 +167,254 @@ func TestConversationsHonourTheirLimit(t *testing.T) {
 		}
 	}
 }
+
+// A reading list is an answer and is kept as one: in the order shown, with
+// each book's title and authors, and only as far as the person may still read
+// each book. A follow-up is routed against this list, so a book named here
+// that they cannot open would leak its title into their next answer.
+func TestAReadingListIsKeptWithTheTurn(t *testing.T) {
+	p := testPool(t)
+	userID := chatUser(t, p)
+	ctx := t.Context()
+
+	holmes, _ := seedSearchFile(t, p, userID, 711, domain.FormatEPUB,
+		"The Adventures of Sherlock Holmes", "Arthur Conan Doyle",
+		[]searchPassage{{text: "To Sherlock Holmes she is always the woman.", major: 1}})
+	dracula, _ := seedSearchFile(t, p, userID, 712, domain.FormatEPUB,
+		"Dracula", "Bram Stoker",
+		[]searchPassage{{text: "Welcome to my house.", major: 1}})
+	// Somebody else's book, which this person cannot open.
+	theirs, _ := seedSearchFile(t, p, secondUser(t, p), 713, domain.FormatEPUB,
+		"Somebody Else's Book", "A Stranger",
+		[]searchPassage{{text: "Private.", major: 1}})
+
+	c, err := p.CreateConversation(ctx, userID, "sherlock", nil)
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+	if _, err := p.AppendMessage(ctx, c.ID, Message{Role: "user", Text: "what sherlock books are there?"}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	if _, err := p.AppendMessage(ctx, c.ID, Message{
+		Role: "assistant", Intent: domain.IntentFindBook,
+		Works: []ListedWork{{WorkID: dracula.WorkID}, {WorkID: theirs.WorkID}, {WorkID: holmes.WorkID},
+			// A work that no longer exists is not recorded, and does not
+			// fail the turn.
+			{WorkID: uuid.New()}},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	read, err := p.Conversation(ctx, userID, c.ID)
+	if err != nil {
+		t.Fatalf("Conversation: %v", err)
+	}
+	if len(read.Messages) != 2 {
+		t.Fatalf("read %d messages", len(read.Messages))
+	}
+	if len(read.Messages[0].Works) != 0 {
+		t.Errorf("the question carries a list: %+v", read.Messages[0].Works)
+	}
+	got := read.Messages[1].Works
+	if len(got) != 2 {
+		t.Fatalf("listed = %+v, want Dracula then Holmes", got)
+	}
+	if got[0].WorkID != dracula.WorkID || got[0].Title != "Dracula" ||
+		len(got[0].Authors) != 1 || got[0].Authors[0] != "Bram Stoker" {
+		t.Errorf("first = %+v", got[0])
+	}
+	if got[1].WorkID != holmes.WorkID || got[1].Title != "The Adventures of Sherlock Holmes" {
+		t.Errorf("second = %+v", got[1])
+	}
+}
+
+// Where a turn's search was narrowed is kept with it, and named back only
+// while the person may still read that book.
+func TestATurnKeepsTheBookItSearched(t *testing.T) {
+	p := testPool(t)
+	userID := chatUser(t, p)
+	ctx := t.Context()
+
+	holmes, _ := seedSearchFile(t, p, userID, 721, domain.FormatEPUB,
+		"The Adventures of Sherlock Holmes", "Arthur Conan Doyle",
+		[]searchPassage{{text: "Moriarty is the Napoleon of crime.", major: 1}})
+	theirs, _ := seedSearchFile(t, p, secondUser(t, p), 722, domain.FormatEPUB,
+		"Somebody Else's Book", "A Stranger",
+		[]searchPassage{{text: "Private.", major: 1}})
+
+	c, err := p.CreateConversation(ctx, userID, "villains", nil)
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+	for _, m := range []Message{
+		{Role: "assistant", Text: "Moriarty [1].", ScopedTo: &ListedWork{WorkID: holmes.WorkID}},
+		{Role: "assistant", Text: "Not yours.", ScopedTo: &ListedWork{WorkID: theirs.WorkID}},
+		{Role: "assistant", Text: "Gone.", ScopedTo: &ListedWork{WorkID: uuid.New()}},
+		{Role: "assistant", Text: "Everywhere."},
+	} {
+		if _, err := p.AppendMessage(ctx, c.ID, m); err != nil {
+			t.Fatalf("AppendMessage %q: %v", m.Text, err)
+		}
+	}
+
+	read, err := p.Conversation(ctx, userID, c.ID)
+	if err != nil {
+		t.Fatalf("Conversation: %v", err)
+	}
+	if len(read.Messages) != 4 {
+		t.Fatalf("read %d messages", len(read.Messages))
+	}
+	got := read.Messages[0].ScopedTo
+	if got == nil || got.WorkID != holmes.WorkID || got.Title != "The Adventures of Sherlock Holmes" ||
+		len(got.Authors) != 1 || got.Authors[0] != "Arthur Conan Doyle" {
+		t.Errorf("scoped = %+v", got)
+	}
+	for _, m := range read.Messages[1:] {
+		if m.ScopedTo != nil {
+			t.Errorf("%q names %+v, want nothing", m.Text, m.ScopedTo)
+		}
+	}
+}
+
+// A citation of a book the person can no longer open stays in their thread,
+// marked unreadable, so its title is not carried into their next prompt.
+func TestACitationSaysWhetherItsBookIsStillReadable(t *testing.T) {
+	p := testPool(t)
+	userID := chatUser(t, p)
+	ctx := t.Context()
+
+	_, mine := seedSearchFile(t, p, userID, 731, domain.FormatEPUB, "Dracula", "Bram Stoker",
+		[]searchPassage{{text: "Welcome to my house.", major: 1}})
+	_, theirs := seedSearchFile(t, p, secondUser(t, p), 732, domain.FormatEPUB, "Somebody Else's Book", "A Stranger",
+		[]searchPassage{{text: "Lent, once.", major: 1}})
+
+	c, err := p.CreateConversation(ctx, userID, "cited", nil)
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+	if _, err := p.AppendMessage(ctx, c.ID, Message{Role: "assistant", Text: "Both [1] [2].",
+		Citations: []Citation{{ChunkID: mine[0], Position: 0, Rank: 1}, {ChunkID: theirs[0], Position: 1, Rank: 2}},
+	}); err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	read, err := p.Conversation(ctx, userID, c.ID)
+	if err != nil {
+		t.Fatalf("Conversation: %v", err)
+	}
+	cites := read.Messages[0].Citations
+	if len(cites) != 2 {
+		t.Fatalf("citations = %+v", cites)
+	}
+	if !cites[0].Readable || cites[0].WorkTitle != "Dracula" {
+		t.Errorf("own book = %+v", cites[0])
+	}
+	if cites[1].Readable {
+		t.Errorf("somebody else's book reads as readable: %+v", cites[1])
+	}
+}
+
+// Merging copies of a book carries what conversations said about the merged
+// copy - a reading list that named it, an answer that searched it - to the
+// kept work. A list that named both copies names the book once.
+func TestMergingCarriesConversationsToTheKeptWork(t *testing.T) {
+	p := testPool(t)
+	userID, keep, fold := twoCopies(t, p, "Dracula", "Bram Stoker")
+	ctx := t.Context()
+	if _, err := p.Exec(ctx, `DELETE FROM conversations WHERE user_id = $1`, userID); err != nil {
+		t.Fatalf("clearing conversations: %v", err)
+	}
+
+	c, err := p.CreateConversation(ctx, userID, "dracula", nil)
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+	both, err := p.AppendMessage(ctx, c.ID, Message{Role: "assistant", Intent: domain.IntentFindBook,
+		Works: []ListedWork{{WorkID: fold}, {WorkID: keep}}})
+	if err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	one, err := p.AppendMessage(ctx, c.ID, Message{Role: "assistant", Intent: domain.IntentFindBook,
+		Works: []ListedWork{{WorkID: fold}}})
+	if err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	scoped, err := p.AppendMessage(ctx, c.ID, Message{Role: "assistant", Text: "The count [1].",
+		ScopedTo: &ListedWork{WorkID: fold}})
+	if err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	if _, err := p.MergeWorks(ctx, userID, keep, []uuid.UUID{fold}); err != nil {
+		t.Fatalf("MergeWorks: %v", err)
+	}
+
+	read, err := p.Conversation(ctx, userID, c.ID)
+	if err != nil {
+		t.Fatalf("Conversation: %v", err)
+	}
+	byID := map[uuid.UUID]Message{}
+	for _, m := range read.Messages {
+		byID[m.ID] = m
+	}
+	for _, id := range []uuid.UUID{both.ID, one.ID} {
+		if w := byID[id].Works; len(w) != 1 || w[0].WorkID != keep {
+			t.Errorf("list %v after the merge = %+v, want the kept work once", id, w)
+		}
+	}
+	if s := byID[scoped.ID].ScopedTo; s == nil || s.WorkID != keep {
+		t.Errorf("scope after the merge = %+v, want the kept work", s)
+	}
+	if n := rowCount(t, p, `SELECT count(*) FROM message_works WHERE work_id = $1`, fold); n != 0 {
+		t.Errorf("%d list entries still name the merged work", n)
+	}
+}
+
+// A work deleted because nothing is left of it leaves conversations that
+// named it intact, without the entry and without the scope.
+func TestDeletingAnEmptyWorkClearsWhatConversationsSaidAboutIt(t *testing.T) {
+	p := testPool(t)
+	userID := chatUser(t, p)
+	ctx := t.Context()
+
+	gone, _ := seedSearchFile(t, p, userID, 741, domain.FormatEPUB, "Gone", "Somebody",
+		[]searchPassage{{text: "Soon gone.", major: 1}})
+	kept, _ := seedSearchFile(t, p, userID, 742, domain.FormatEPUB, "Kept", "Somebody Else",
+		[]searchPassage{{text: "Still here.", major: 1}})
+
+	c, err := p.CreateConversation(ctx, userID, "lists", nil)
+	if err != nil {
+		t.Fatalf("CreateConversation: %v", err)
+	}
+	list, err := p.AppendMessage(ctx, c.ID, Message{Role: "assistant", Intent: domain.IntentFindBook,
+		Works: []ListedWork{{WorkID: gone.WorkID}, {WorkID: kept.WorkID}}})
+	if err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+	scoped, err := p.AppendMessage(ctx, c.ID, Message{Role: "assistant", Text: "From it [1].",
+		ScopedTo: &ListedWork{WorkID: gone.WorkID}})
+	if err != nil {
+		t.Fatalf("AppendMessage: %v", err)
+	}
+
+	var edition uuid.UUID
+	if err := p.QueryRow(ctx, `SELECT edition_id FROM book_files WHERE id = $1`, gone.BookFileID).Scan(&edition); err != nil {
+		t.Fatalf("reading the edition: %v", err)
+	}
+	if _, err := p.Exec(ctx, `DELETE FROM book_files WHERE id = $1`, gone.BookFileID); err != nil {
+		t.Fatalf("deleting the file: %v", err)
+	}
+	if err := p.DeleteEmptyEditions(ctx, []uuid.UUID{edition}); err != nil {
+		t.Fatalf("DeleteEmptyEditions: %v", err)
+	}
+	if n := rowCount(t, p, `SELECT count(*) FROM works WHERE id = $1`, gone.WorkID); n != 0 {
+		t.Fatal("the empty work was not deleted")
+	}
+
+	if n := rowCount(t, p, `SELECT count(*) FROM message_works WHERE message_id = $1`, list.ID); n != 1 {
+		t.Errorf("the list has %d entries, want the one left", n)
+	}
+	if n := rowCount(t, p, `SELECT count(*) FROM messages WHERE id = $1 AND scoped_work_id IS NULL`, scoped.ID); n != 1 {
+		t.Error("the answer still names a deleted work as its scope")
+	}
+}

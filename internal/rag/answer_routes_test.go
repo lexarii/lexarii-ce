@@ -83,7 +83,7 @@ func TestAReadingListFallsBackToTitleSearch(t *testing.T) {
 			t.Errorf("Books = %v", listTitles(books))
 		}
 		last := store.libraryCalls[len(store.libraryCalls)-1]
-		if last.Search != "Dune" || last.Limit != maxBooksInAnswer {
+		if last.Search != "Dune" || last.Limit != maxBooksInAnswer || !last.ByTitleMatch {
 			t.Errorf("title search = %+v", last)
 		}
 	})
