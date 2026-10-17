@@ -3,6 +3,7 @@
 package rag
 
 import (
+	"math/rand/v2"
 	"reflect"
 	"strings"
 	"testing"
@@ -95,6 +96,8 @@ func TestNormaliseCitations(t *testing.T) {
 		{"adjacent plain stays as it is", "Both [1][2].", "Both [1][2]."},
 		{"mixed in one answer", "One [1], two 【2】, three [3†L4].", "One [1], two [2], three [3]."},
 		{"at the very start and end", "【1】 begins, ends 【2†x】", "[1] begins, ends [2]"},
+		{"ASCII marker inside lenticular brackets", "urges him to begone【[1]】.", "urges him to begone[1]."},
+		{"wrapped markers side by side", "Both 【[1]】【[2]】 and 【 [3] †L4】.", "Both [1][2] and [3]."},
 
 		// Not markers, and so not touched.
 		{"lenticular around words", "The heading 【Note】 stays.", "The heading 【Note】 stays."},
@@ -132,6 +135,7 @@ func TestCitationStreamAgreesWithTheWholeAnswer(t *testing.T) {
 	answers := []string{
 		"Victor flees 【1†L10-L20】 and the creature 【2】【3】 is left [4†L1]. End [5].",
 		"An array [i] is not a citation, nor is 【Note】, but 【12】 is.",
+		"Wrapped 【[1]】 and 【[2]】【[3]】, then plain [4] and 【[5】 too.",
 		"Unclosed at the end 【1†L4",
 		"A line break 【1\n】 and a long one 【2†" + strings.Repeat("y", 60) + "】 then 【3】",
 		"",
@@ -186,4 +190,27 @@ func streamed(pieces ...string) string {
 	}
 	s.flush()
 	return b.String()
+}
+
+// Random answers built from the pieces markers are made of, split at random,
+// still stream to exactly the normalised whole. Seeded, so a failure repeats.
+func TestCitationStreamRandomSplits(t *testing.T) {
+	parts := []string{"【", "】", "[", "]", "†", "1", "23", " ", "\n", "L4", "x", "é", "【[1]】", "[2†L1]", "【3】"}
+	rng := rand.New(rand.NewPCG(1, 2))
+	for range 20000 {
+		var b strings.Builder
+		for range rng.IntN(12) {
+			b.WriteString(parts[rng.IntN(len(parts))])
+		}
+		answer := b.String()
+		var pieces []string
+		for rest := answer; rest != ""; {
+			n := min(1+rng.IntN(6), len(rest))
+			pieces = append(pieces, rest[:n])
+			rest = rest[n:]
+		}
+		if got, want := streamed(pieces...), NormaliseCitations(answer); got != want {
+			t.Fatalf("pieces %q:\n got %q\nwant %q", pieces, got, want)
+		}
+	}
 }

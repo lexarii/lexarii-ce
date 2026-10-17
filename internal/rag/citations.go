@@ -87,6 +87,8 @@ func InventedCitations(answer string, available int) []int {
 //   - 【n†anything】 becomes [n]. The locator after the dagger is dropped: it
 //     points into the model's own view of the prompt, not into the book.
 //   - [n†anything] becomes [n].
+//   - 【[n]】 becomes [n]: a model told to cite as [n] that still reaches for
+//     its own brackets sometimes wraps the one in the other.
 //   - [n] is left alone, and so is every other bracket.
 //
 // n is one to three ASCII digits, as CitedNumbers requires. What follows the
@@ -102,7 +104,7 @@ func InventedCitations(answer string, available int) []int {
 // Range checking is not done here. 【17】 from a model given ten passages
 // becomes [17], and CitedNumbers drops it exactly as it drops a [17].
 var citationVariant = regexp.MustCompile(
-	`【 {0,2}(\d{1,3}) {0,2}(?:†[^\[\]【】\n]{0,` + strconv.Itoa(maxCitationSuffix) + `})?】` +
+	`【 {0,2}\[?(\d{1,3})\]? {0,2}(?:†[^\[\]【】\n]{0,` + strconv.Itoa(maxCitationSuffix) + `})?】` +
 		`|\[(\d{1,3})†[^\[\]【】\n]{0,` + strconv.Itoa(maxCitationSuffix) + `}\]`)
 
 // maxCitationSuffix bounds the locator after a dagger. Longer than any real one
@@ -110,9 +112,9 @@ var citationVariant = regexp.MustCompile(
 // start a marker that runs on through a paragraph.
 const maxCitationSuffix = 40
 
-// maxCitationRunes is the longest a variant marker can be: 【, two spaces,
-// three digits, two spaces, the dagger, the suffix, 】.
-const maxCitationRunes = 1 + 2 + 3 + 2 + 1 + maxCitationSuffix + 1
+// maxCitationRunes is the longest a variant marker can be: 【, two spaces, [,
+// three digits, ], two spaces, the dagger, the suffix, 】.
+const maxCitationRunes = 1 + 2 + 1 + 3 + 1 + 2 + 1 + maxCitationSuffix + 1
 
 // NormaliseCitations rewrites the citation notations some models use to the
 // [n] the rest of the system reads. See citationVariant for the rules.
@@ -176,9 +178,11 @@ func (s *citationStream) flush() {
 // heldFrom returns where the part of text that must wait for more begins:
 // len(text) when none of it has to.
 //
-// No marker contains a bracket other than its own two, so a marker that is not
-// finished yet starts at the LAST opening bracket. Everything before that is
-// settled. Splitting there is safe for the same reason: no marker can span it.
+// The only marker with a bracket inside it is 【[n]】, and its inner pair is
+// ASCII. So an unfinished marker starts at the last 【 that has not been closed,
+// if there is one close enough to still be a marker; otherwise at the last [
+// that has not been closed. Everything before that is settled, and no marker
+// can span the split.
 func heldFrom(text string) int {
 	// A delta can in principle end inside a multi-byte character, and the
 	// first byte of 【 alone matches nothing.
@@ -187,7 +191,13 @@ func heldFrom(text string) int {
 		end = start
 	}
 
-	open := max(strings.LastIndexByte(text[:end], '['), strings.LastIndex(text[:end], "【"))
+	if open := strings.LastIndex(text[:end], "【"); open >= 0 {
+		tail := text[open:end]
+		if !strings.ContainsAny(tail, "】\n") && utf8.RuneCountInString(tail) < maxCitationRunes {
+			return open
+		}
+	}
+	open := strings.LastIndexByte(text[:end], '[')
 	if open < 0 {
 		return end
 	}
