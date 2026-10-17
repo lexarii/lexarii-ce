@@ -9,6 +9,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strconv"
+	"time"
 
 	"scm.poniatowski.dev/adam/lexarii/internal/http/dto"
 )
@@ -18,11 +20,17 @@ import (
 type ErrorCode string
 
 const (
-	CodeNotFound   ErrorCode = "not_found"
-	CodeInvalid    ErrorCode = "invalid_request"
-	CodeConflict   ErrorCode = "conflict"
-	CodeInternal   ErrorCode = "internal_error"
+	CodeNotFound ErrorCode = "not_found"
+	CodeInvalid  ErrorCode = "invalid_request"
+	CodeConflict ErrorCode = "conflict"
+	CodeInternal ErrorCode = "internal_error"
+	// CodeLLMOffline is a 503: the chat model is busy, slow or switched off,
+	// and asking again later may work. Only answers are affected - the
+	// library and the reader never depend on the model.
 	CodeLLMOffline ErrorCode = "llm_unavailable"
+	// CodeModelError is a 502: the chat model server refused the request
+	// itself, which is a configuration problem for whoever runs it.
+	CodeModelError ErrorCode = "model_error"
 )
 
 // The wire shape lives in dto.Error, so the generated API spec and the
@@ -43,26 +51,46 @@ func respondJSON(w http.ResponseWriter, status int, v any) {
 // respondError writes the canonical error shape. Sentinel errors are mapped to
 // status codes here and nowhere else.
 func respondError(w http.ResponseWriter, err error) {
-	status, code := http.StatusInternalServerError, CodeInternal
-	message := "an unexpected error occurred"
+	f := describe(err)
+	if f.retryAfter > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(f.retryAfter)))
+	}
+	respondJSON(w, f.status, dto.Error{Error: f.detail()})
+}
 
+// failure is an error as the client is told it.
+type failure struct {
+	status     int
+	code       ErrorCode
+	message    string
+	retryAfter time.Duration
+}
+
+func (f failure) detail() dto.ErrorDetail {
+	return dto.ErrorDetail{Code: string(f.code), Message: f.message}
+}
+
+// describe decides what the client is told about err. It is the one mapping,
+// shared by respondError and by a stream that fails after its headers are
+// sent and can only say so in an event.
+func describe(err error) failure {
 	var he *httpError
 	var pe *PolicyError
-	if errors.As(err, &he) {
-		status, code, message = he.status, he.code, he.message
-	} else if errors.As(err, &pe) {
+	switch {
+	case errors.As(err, &he):
+		return failure{status: he.status, code: he.code, message: he.message}
+	case errors.As(err, &pe):
 		he = pe.asHTTPError()
-		status, code, message = he.status, he.code, he.message
-	} else {
-		// Unexpected errors are logged in full and reported vaguely, so internal
-		// detail never leaks to the client.
-		slog.Error("unhandled error", "error", err)
+		return failure{status: he.status, code: he.code, message: he.message}
 	}
-
-	respondJSON(w, status, dto.Error{Error: dto.ErrorDetail{
-		Code:    string(code),
-		Message: message,
-	}})
+	if f, ok := describeModelFailure(err); ok {
+		return f
+	}
+	// Unexpected errors are logged in full and reported vaguely, so internal
+	// detail never leaks to the client.
+	slog.Error("unhandled error", "error", err)
+	return failure{status: http.StatusInternalServerError, code: CodeInternal,
+		message: "an unexpected error occurred"}
 }
 
 type httpError struct {

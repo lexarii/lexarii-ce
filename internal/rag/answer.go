@@ -884,14 +884,21 @@ func (a *Answerer) generate(ctx context.Context, question string, passages []dom
 	// there is one path through the pipeline and only the last step differs.
 	var reply llm.Reply
 	if onDelta != nil {
-		reply, err = a.Chat.Stream(ctx, req, onDelta)
+		// The pieces are normalised on their way out, so what the person
+		// watches being written is what is stored. A partial answer that
+		// failed still releases what was held: it was written.
+		stream := newCitationStream(onDelta)
+		reply, err = a.Chat.Stream(ctx, req, stream.write)
+		stream.flush()
 	} else {
 		reply, err = a.Chat.Complete(ctx, req)
 	}
 	if err != nil {
 		return llm.Reply{}, fmt.Errorf("generating an answer: %w", err)
 	}
-	reply.Content = strings.TrimSpace(reply.Content)
+	// One citation notation from here on: the citations are read from this
+	// text, it is what is stored, and it is what the client renders.
+	reply.Content = NormaliseCitations(strings.TrimSpace(reply.Content))
 	return reply, nil
 }
 

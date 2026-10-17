@@ -100,7 +100,7 @@ func (c *Client) Stream(ctx context.Context, req Request, onDelta func(string)) 
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
-		return Reply{}, fmt.Errorf("model unreachable at %s: %w", c.baseURL, err)
+		return Reply{}, transportError(c.baseURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -129,7 +129,7 @@ func readStream(ctx context.Context, body io.Reader, onDelta func(string)) (Repl
 		// the server has queued.
 		if err := ctx.Err(); err != nil {
 			out.Content = text.String()
-			return out, err
+			return out, interruptedError("reading stream", err)
 		}
 
 		line := strings.TrimSpace(scanner.Text())
@@ -196,7 +196,7 @@ func readStream(ctx context.Context, body io.Reader, onDelta func(string)) (Repl
 	out.Content = text.String()
 
 	if err := scanner.Err(); err != nil {
-		return out, fmt.Errorf("reading stream: %w", err)
+		return out, interruptedError("reading stream", err)
 	}
 	if out.Content == "" && !out.Reasoned {
 		return out, ErrEmptyReply

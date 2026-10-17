@@ -520,6 +520,12 @@ export interface AskHandlers {
 	onDelta?: (text: string) => void;
 }
 
+/** The status a request would have had, for the codes a stream can end with. */
+const streamFailureStatus: Record<string, number> = {
+	llm_unavailable: 503,
+	model_error: 502
+};
+
 /**
  * Asks a question and reports the answer as it is written.
  *
@@ -571,7 +577,7 @@ export async function askStreaming(
 	const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
 	let buffer = '';
 	let answer: Answer | null = null;
-	let failure: string | null = null;
+	let failure: { code?: string; message?: string } | null = null;
 
 	try {
 		for (;;) {
@@ -614,7 +620,9 @@ export async function askStreaming(
 						answer = payload as Answer;
 						break;
 					case 'error':
-						failure = (payload as { message: string }).message;
+						// The code and message the request would have failed
+						// with, had the stream not already opened.
+						failure = payload as { code?: string; message?: string };
 						break;
 				}
 			}
@@ -625,7 +633,14 @@ export async function askStreaming(
 		reader.releaseLock();
 	}
 
-	if (failure) throw new ApiError('answer_failed', failure, 500);
+	if (failure) {
+		const code = failure.code || 'answer_failed';
+		throw new ApiError(
+			code,
+			failure.message || 'the answer failed',
+			streamFailureStatus[code] ?? 500
+		);
+	}
 	if (!answer) throw new ApiError('answer_incomplete', 'the answer ended before it finished', 500);
 	return answer;
 }

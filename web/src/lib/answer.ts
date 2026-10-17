@@ -118,3 +118,33 @@ export function segments(content: string): Piece[] {
 	if (last < content.length) out.push({ text: content.slice(last), cite: null });
 	return out;
 }
+
+/** What a question that could not be answered should say. */
+export type AskFailure = {
+	message: string;
+	/** True when it is worth asking again in a while: nothing is broken. */
+	busy: boolean;
+};
+
+/** Said when a proxy answered for the server, with no message of its own. */
+export const UNREACHABLE = 'The server did not answer. Try again in a minute.';
+
+/**
+ * Turns a failed ask into what the person reads.
+ *
+ * The server already words the model's failures for people - "The assistant is
+ * busy right now. Try again in a minute." - so those are shown as they come.
+ * What changes is the tone: a busy model is weather, not a fault, and is not
+ * shown in the colour of one. A proxy's own error page has no message worth
+ * showing ("Bad Gateway"), so it gets one.
+ */
+export function askFailure(err: unknown): AskFailure {
+	const code = typeof err === 'object' && err && 'code' in err ? String(err.code) : '';
+	const message = err instanceof Error ? err.message : String(err);
+
+	if (code === 'llm_unavailable') return { message, busy: true };
+	if (code === 'http_502' || code === 'http_503' || code === 'http_504') {
+		return { message: UNREACHABLE, busy: true };
+	}
+	return { message, busy: false };
+}

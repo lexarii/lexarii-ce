@@ -346,6 +346,61 @@ func TestAStreamedAnswerIsFramedInOrder(t *testing.T) {
 	}
 }
 
+// A model that cites as 【n†Lx-Ly】, with markers split across the stream's
+// pieces: what was streamed, what the done event carries and what is stored
+// are one text in one notation, and the citations are linked.
+func TestAStreamedAnswerInAnotherCitationNotationIsNormalised(t *testing.T) {
+	threads := newChatThreadStore()
+	search := &chatSearchFake{passages: chatPassages()}
+	model := &chatModel{deltas: []string{
+		"An eigenvector keeps its direction 【", "1†L10", "-L20】, as both say 【1】【",
+		"2】 [2†L4].",
+	}}
+	h := &ChatHandler{Store: threads, Answerer: chatAnswererWithModel(t, search, model)}
+
+	rec := httptest.NewRecorder()
+	h.Stream(rec, chatRequest(http.MethodPost, "/api/v1/conversations/stream",
+		`{"question":"what is an eigenvector?"}`, uuid.New(), ""))
+
+	const want = "An eigenvector keeps its direction [1], as both say [1][2] [2]."
+	var streamed strings.Builder
+	var done dto.Answer
+	for _, e := range events(t, rec.Body.String()) {
+		switch e[0] {
+		case "delta":
+			var d dto.AnswerDelta
+			if err := json.Unmarshal([]byte(e[1]), &d); err != nil {
+				t.Fatalf("delta: %v", err)
+			}
+			if strings.ContainsAny(d.Text, "【】†") {
+				t.Errorf("a delta carried the model's own notation: %q", d.Text)
+			}
+			streamed.WriteString(d.Text)
+		case "done":
+			if err := json.Unmarshal([]byte(e[1]), &done); err != nil {
+				t.Fatalf("done: %v", err)
+			}
+		}
+	}
+	if streamed.String() != want {
+		t.Errorf("streamed = %q, want %q", streamed.String(), want)
+	}
+	if done.Answer != want {
+		t.Errorf("done = %q, want %q", done.Answer, want)
+	}
+	if len(threads.appended) != 2 || threads.appended[1].Text != want {
+		t.Fatalf("stored = %+v, want the normalised text", threads.appended)
+	}
+	if c := threads.appended[1].Citations; len(c) != 2 || c[0].Rank != 1 || c[1].Rank != 2 {
+		t.Errorf("citations = %+v, want both passages linked", c)
+	}
+	for _, s := range done.Sources {
+		if !s.Cited {
+			t.Errorf("source %d is not marked cited", s.Number)
+		}
+	}
+}
+
 // Invariant 3: with no model configured the conversation still works - the
 // question is stored, the passages are found and shown, and the stream ends.
 func TestAStreamWithNoModelIsSearchWithCitations(t *testing.T) {
@@ -407,9 +462,14 @@ func TestAStreamWhoseModelFailsEndsWithAnError(t *testing.T) {
 			if strings.Join(names, ",") != strings.Join(tc.want, ",") {
 				t.Fatalf("events = %v, want %v", names, tc.want)
 			}
-			var e map[string]string
-			if err := json.Unmarshal([]byte(got[len(got)-1][1]), &e); err != nil || e["message"] == "" {
-				t.Errorf("error event = %s, want a message", got[len(got)-1][1])
+			var e dto.ErrorDetail
+			if err := json.Unmarshal([]byte(got[len(got)-1][1]), &e); err != nil || e.Message == "" || e.Code == "" {
+				t.Errorf("error event = %s, want a code and a message", got[len(got)-1][1])
+			}
+			// The model server's own words are for the log, not the reader.
+			if strings.Contains(got[len(got)-1][1], "model unavailable") ||
+				strings.Contains(got[len(got)-1][1], "fell over") {
+				t.Errorf("error event = %s, carries the model server's reply", got[len(got)-1][1])
 			}
 			if len(threads.appended) != 1 || threads.appended[0].Role != "user" {
 				t.Errorf("appended = %+v, want the question kept and no answer", threads.appended)
@@ -672,8 +732,9 @@ func TestAskingWhenTheModelFailsKeepsTheQuestion(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	h.Post(rec, chatRequest(http.MethodPost, "/x", `{"question":"what is the spectrum?"}`, uuid.New(), ""))
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("status = %d, want 500", rec.Code)
+	// The fake refuses with a 400: the model server rejecting the request.
+	if rec.Code != http.StatusBadGateway || authErrorCode(t, rec) != string(CodeModelError) {
+		t.Fatalf("status = %d body = %s, want 502 model_error", rec.Code, rec.Body)
 	}
 	if len(threads.appended) != 1 || threads.appended[0].Text != "what is the spectrum?" {
 		t.Errorf("appended = %+v, want the question kept", threads.appended)

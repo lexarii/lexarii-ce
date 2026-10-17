@@ -824,6 +824,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Answer' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '502': { $ref: '#/components/responses/ModelError' }
+        '503': { $ref: '#/components/responses/ModelBusy' }
 
   /conversations:
     get:
@@ -855,6 +857,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Answer' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '502': { $ref: '#/components/responses/ModelError' }
+        '503': { $ref: '#/components/responses/ModelBusy' }
 
   /conversations/stream:
     post:
@@ -871,6 +875,16 @@ paths:
 
         Everything that can fail with a status code fails before the stream
         opens: once headers are sent, a 404 can no longer be reported.
+
+        The `error` event is an ErrorDetail: the code and message the request
+        would have failed with had the stream not opened yet. A model that is
+        busy, slow or unreachable is `llm_unavailable`, with the wait in
+        `details.retryAfterSeconds`; a model server that refused the request
+        is `model_error`.
+
+        Citations in `delta`, `done` and the stored message are always `[n]`,
+        whatever notation the model wrote them in; the deltas joined are the
+        stored text, apart from surrounding whitespace.
       requestBody:
         required: true
         content:
@@ -931,6 +945,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Answer' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '502': { $ref: '#/components/responses/ModelError' }
+        '503': { $ref: '#/components/responses/ModelBusy' }
 
   /conversations/{id}/messages/stream:
     post:

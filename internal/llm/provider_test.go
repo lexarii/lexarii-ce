@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -424,6 +425,14 @@ func TestErrorMapping(t *testing.T) {
 			if tc.sentinel != nil && !errors.Is(err, tc.sentinel) {
 				t.Errorf("errors.Is(%v) = false", tc.sentinel)
 			}
+			// Busy is exactly what is worth trying again; every other 4xx is
+			// the request's own fault.
+			if errors.Is(err, ErrBusy) != tc.retryable {
+				t.Errorf("errors.Is(ErrBusy) = %v, want %v", !tc.retryable, tc.retryable)
+			}
+			if rejected := tc.status < 500 && !tc.retryable; errors.Is(err, ErrRejected) != rejected {
+				t.Errorf("errors.Is(ErrRejected) = %v, want %v", !rejected, rejected)
+			}
 			if tc.wantInText != "" && !strings.Contains(err.Error(), tc.wantInText) {
 				t.Errorf("%q missing from %q", tc.wantInText, err.Error())
 			}
@@ -627,5 +636,143 @@ func TestExtraHeadersReachThePingToo(t *testing.T) {
 	})
 	if err := c.Ping(context.Background()); err != nil || title != "Lexarii" {
 		t.Fatalf("err %v title %q", err, title)
+	}
+}
+
+// A request that never got an answer says which way it failed: too slow is a
+// busy server, no connection is an absent one, and a caller who gave up is
+// neither.
+func TestTransportFailuresAreClassified(t *testing.T) {
+	// Holds every request until the client gives up on it. The body is read
+	// first, because only then does the server notice a client going away.
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(slow.Close)
+	t.Cleanup(func() { close(release) })
+	gone := httptest.NewServer(http.NotFoundHandler())
+	goneURL := gone.URL
+	gone.Close()
+
+	impatient := func(url string) *Client {
+		return New(config.ModelConfig{BaseURL: url, Model: "m", MaxConcurrency: 1, Timeout: 100 * time.Millisecond})
+	}
+	request := Request{Messages: []Message{User("q")}}
+
+	for _, tc := range []struct {
+		name string
+		call func(context.Context) error
+		ctx  func() context.Context
+		want error
+	}{
+		{"a complete that times out", func(ctx context.Context) error {
+			_, err := impatient(slow.URL).Complete(ctx, request)
+			return err
+		}, context.Background, ErrBusy},
+		{"a stream that times out", func(ctx context.Context) error {
+			_, err := impatient(slow.URL).Stream(ctx, request, nil)
+			return err
+		}, context.Background, ErrBusy},
+		{"a refused connection", func(ctx context.Context) error {
+			_, err := impatient(goneURL).Complete(ctx, request)
+			return err
+		}, context.Background, ErrUnreachable},
+		{"a caller who gave up", func(ctx context.Context) error {
+			_, err := impatient(slow.URL).Complete(ctx, request)
+			return err
+		}, func() context.Context {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx
+		}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.call(tc.ctx())
+			if err == nil {
+				t.Fatal("no error")
+			}
+			for _, sentinel := range []error{ErrBusy, ErrUnreachable, ErrRejected} {
+				if got, want := errors.Is(err, sentinel), sentinel == tc.want; got != want {
+					t.Errorf("errors.Is(%v) = %v, want %v; err = %v", sentinel, got, want, err)
+				}
+			}
+			if tc.want == nil && !errors.Is(err, context.Canceled) {
+				t.Errorf("err = %v, want context.Canceled kept", err)
+			}
+			if RetryAfter(err) != 0 {
+				t.Errorf("RetryAfter = %v with no server to say so", RetryAfter(err))
+			}
+		})
+	}
+}
+
+// A failure reported inside a stream carries the provider's own code, which
+// says busy or rejected the way a status would.
+func TestMidStreamErrorsAreClassifiedByTheirCode(t *testing.T) {
+	for _, tc := range []struct {
+		code string
+		want error
+	}{
+		{`429`, ErrBusy},
+		{`"502"`, ErrBusy},
+		{`"server_error"`, ErrBusy},
+		{`null`, ErrBusy},
+		{`400`, ErrRejected},
+		{`"404"`, ErrRejected},
+	} {
+		t.Run(tc.code, func(t *testing.T) {
+			event := `data: {"error":{"code":` + tc.code + `,"message":"provider said no"}}` + "\n\n"
+			_, err := readStream(t.Context(), strings.NewReader(event), nil)
+			for _, sentinel := range []error{ErrBusy, ErrRejected} {
+				if got, want := errors.Is(err, sentinel), sentinel == tc.want; got != want {
+					t.Errorf("errors.Is(%v) = %v, want %v; err = %v", sentinel, got, want, err)
+				}
+			}
+		})
+	}
+}
+
+func TestRetryAfterReadsTheServersHeader(t *testing.T) {
+	err := fmt.Errorf("generating: %w", &HTTPError{Status: 429, RetryAfter: 7 * time.Second})
+	if got := RetryAfter(err); got != 7*time.Second {
+		t.Errorf("RetryAfter = %v, want 7s", got)
+	}
+	if got := RetryAfter(errors.New("something else")); got != 0 {
+		t.Errorf("RetryAfter of a plain error = %v", got)
+	}
+}
+
+// Some connections fail because of configuration, and fail the same way every
+// time: they are rejected, never busy, so nobody is told to wait a minute.
+func TestMisconfiguredConnectionsAreRejectedNotBusy(t *testing.T) {
+	tlsServer := httptest.NewTLSServer(http.NotFoundHandler())
+	t.Cleanup(tlsServer.Close)
+
+	for _, tc := range []struct{ name, url string }{
+		// The test server's certificate is signed by nobody this client trusts.
+		{"a certificate that does not verify", tlsServer.URL},
+		{"a scheme that is not http", "ftp://models.invalid/v1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := New(config.ModelConfig{BaseURL: tc.url, Model: "m", MaxConcurrency: 1, Timeout: 2 * time.Second})
+			_, err := client.Complete(t.Context(), Request{Messages: []Message{User("q")}})
+			if !errors.Is(err, ErrRejected) || errors.Is(err, ErrBusy) || errors.Is(err, ErrUnreachable) {
+				t.Fatalf("err = %v, want ErrRejected only", err)
+			}
+		})
+	}
+}
+
+// A stream line longer than the stream allows is the same line every time.
+func TestAnOversizedStreamLineIsRejected(t *testing.T) {
+	line := "data: " + strings.Repeat("x", maxStreamLine+1) + "\n\n"
+	_, err := readStream(t.Context(), strings.NewReader(line), nil)
+	if !errors.Is(err, ErrRejected) || errors.Is(err, ErrBusy) {
+		t.Fatalf("err = %v, want ErrRejected", err)
 	}
 }

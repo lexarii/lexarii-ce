@@ -4,11 +4,15 @@ package postgres
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"scm.poniatowski.dev/adam/lexarii/internal/domain"
 	"scm.poniatowski.dev/adam/lexarii/internal/store"
@@ -68,6 +72,13 @@ const (
 	// maxEFSearch bounds that depth. Deeper is slower for diminishing recall,
 	// and this runs on a home server.
 	maxEFSearch = 400
+
+	// fallbackPool is how many candidates' worth of passages with only some
+	// of the question's words are ranked by cover density. See Search.
+	fallbackPool = 4
+	// fallbackWords is how many of the question's words the fallback
+	// searches for, rarest first.
+	fallbackWords = 16
 )
 
 // efSearchFor is how deep the HNSW scan goes for a given candidate count.
@@ -90,7 +101,44 @@ func efSearchFor(candidates int) int {
 // not an optimisation: each arm's rank depends on the whole candidate set, so
 // splitting the query would mean transferring both sets in full to compute
 // something Postgres can compute while it already has them.
+//
+// With no vector the keyword arm is the whole search, and it falls back to
+// any of the question's words when requiring every word finds too little; see
+// the any_words step. That fallback is the one part of the statement whose
+// cost depends on the question, so the statement runs under
+// searchStatementTimeout, and a search that hits it is run again without the
+// fallback rather than failing the question.
 func (p *Pool) Search(ctx context.Context, q SearchQuery) ([]domain.RetrievedChunk, error) {
+	// With a vector the meaning arm finds what has only some of the words, and
+	// the fallback's passages would compete with it at full fusion weight: a
+	// passage sharing one common word with the question outranked the best
+	// passage by meaning. So hybrid search is exactly what it was.
+	fallback := len(q.Vector) == 0
+	out, err := p.search(ctx, q, fallback)
+	if fallback && isStatementTimeout(err) && ctx.Err() == nil {
+		slog.Warn("keyword search timed out with the any-word fallback; searching without it",
+			"timeout", searchStatementTimeout, "error", err)
+		return p.search(ctx, q, false)
+	}
+	return out, err
+}
+
+// searchStatementTimeout bounds one search statement. A backstop, not a
+// budget: the slowest question measured takes well under a second.
+var searchStatementTimeout = 5 * time.Second
+
+// isStatementTimeout reports Postgres cancelling a statement for running past
+// statement_timeout.
+func isStatementTimeout(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == codeQueryCanceled
+}
+
+// slowFallbackForTest makes the fallback take a second, so a test can watch the
+// timeout and the retry without a library big enough to be slow.
+var slowFallbackForTest = false
+
+func (p *Pool) search(ctx context.Context, q SearchQuery, fallback bool) ([]domain.RetrievedChunk, error) {
 	limit := q.Limit
 	if limit <= 0 || limit > 200 {
 		limit = DefaultSearchLimit
@@ -143,6 +191,17 @@ func (p *Pool) Search(ctx context.Context, q SearchQuery) ([]domain.RetrievedChu
 	}
 
 	candidatesArg := arg(candidates)
+	poolArg := arg(candidates * fallbackPool)
+	maxWordsArg := arg(fallbackWords)
+	// Built into the statement rather than passed, so that without the
+	// fallback its step is planned as never running at all.
+	fallbackGate := "false"
+	if fallback {
+		fallbackGate = "true"
+		if slowFallbackForTest {
+			fallbackGate = "(SELECT pg_sleep(1)) IS NOT NULL"
+		}
+	}
 	kArg := arg(k)
 	limitArg := arg(limit)
 
@@ -168,14 +227,93 @@ func (p *Pool) Search(ctx context.Context, q SearchQuery) ([]domain.RetrievedChu
 			ORDER BY e.vector <=> ` + vectorArg + `
 			LIMIT ` + candidatesArg + `
 		),
-		sparse AS (
-			SELECT c.id,
-			       row_number() OVER (ORDER BY ts_rank_cd(c.tsv, query) DESC, c.id) AS rank
+		every_word AS (
+			SELECT c.id, ts_rank_cd(c.tsv, query) AS score
 			FROM chunks c
 			` + joins + `,
 			     websearch_to_tsquery('english', ` + textArg + `) AS query
 			WHERE c.tsv @@ query` + filters.String() + `
-			ORDER BY ts_rank_cd(c.tsv, query) DESC, c.id
+			ORDER BY score DESC, c.id
+			LIMIT ` + candidatesArg + `
+		),
+		-- The question's words, any of them rather than all, for when
+		-- requiring every word finds too little.
+		--
+		-- At most fallbackWords of them, and the rarest that are in the
+		-- library at all. A word in no passage cannot match, and costs one
+		-- index probe to rule out. Among the rest, the planner's own
+		-- statistics on the column say which lexemes are common; a word they
+		-- do not list counts as rare, in the order asked. Unbounded, a
+		-- 400-word question took 11.6 seconds on 100,000 passages, and the
+		-- rare words are the ones that say what a question is about.
+		--
+		-- From to_tsvector, so Postgres does the parsing, stemming and stop
+		-- word removal, and quoted lexeme by lexeme into a tsquery. Known
+		-- skew: a hyphenated word is three lexemes here (well-known, well,
+		-- known) and so counts three times towards matched.
+		stats AS (
+			SELECT most_common_elems::text::text[] AS elems, most_common_elem_freqs AS freqs
+			FROM pg_stats
+			WHERE schemaname = current_schema() AND tablename = 'chunks' AND attname = 'tsv'
+		),
+		lexemes AS (
+			SELECT q.lexeme, q.positions[1] AS position,
+			       ('''' || replace(replace(q.lexeme, '\', '\\'), '''', '''''') || '''')::tsquery AS term
+			FROM unnest(to_tsvector('english', ` + textArg + `)) AS q
+		),
+		picked AS (
+			SELECT l.lexeme, l.term
+			FROM lexemes l
+			WHERE ` + fallbackGate + `
+			  AND EXISTS (SELECT 1 FROM chunks c WHERE c.tsv @@ l.term)
+			ORDER BY COALESCE((SELECT s.freqs[array_position(s.elems, l.lexeme)] FROM stats s), 0),
+			         l.position
+			LIMIT ` + maxWordsArg + `
+		),
+		words AS (
+			SELECT string_agg(term::text, ' | ')::tsquery AS any_word,
+			       array_agg(lexeme) AS each_word,
+			       -- A query that excludes a word has said what it does not
+			       -- want, and matching any word would bring it back.
+			       (SELECT strpos(websearch_to_tsquery('english', ` + textArg + `)::text, '!') > 0) AS excludes
+			FROM picked
+		),
+		-- Every passage with any of the words, most of the words first. Only
+		-- this pool is ranked by cover density, in the next step: ranking
+		-- every match that way is what made a common word slow.
+		any_words AS (
+			SELECT c.id, c.tsv,
+			       -- How many of the question's words the passage has: what
+			       -- deleting them takes out of its vector.
+			       length(c.tsv) - length(ts_delete(c.tsv, w.each_word)) AS matched
+			FROM chunks c
+			` + joins + `,
+			     words w
+			WHERE ` + fallbackGate + `
+			  AND c.tsv @@ w.any_word
+			  -- Only when requiring every word came back short.
+			  AND (SELECT count(*) FROM every_word) < ` + limitArg + `
+			  AND NOT w.excludes
+			  AND c.id NOT IN (SELECT id FROM every_word)` + filters.String() + `
+			ORDER BY matched DESC, c.id
+			LIMIT ` + poolArg + `
+		),
+		some_words AS (
+			SELECT a.id, a.matched, ts_rank_cd(a.tsv, w.any_word) AS score
+			FROM any_words a, words w
+			ORDER BY a.matched DESC, score DESC, a.id
+			LIMIT ` + candidatesArg + `
+		),
+		sparse AS (
+			SELECT id, row_number() OVER (ORDER BY tier, place) AS rank
+			FROM (
+				SELECT id, 0 AS tier, row_number() OVER (ORDER BY score DESC, id) AS place
+				FROM every_word
+				UNION ALL
+				SELECT id, 1 AS tier, row_number() OVER (ORDER BY matched DESC, score DESC, id) AS place
+				FROM some_words
+			) AS tiers
+			ORDER BY rank
 			LIMIT ` + candidatesArg + `
 		),
 		fused AS (
@@ -222,6 +360,10 @@ func (p *Pool) Search(ctx context.Context, q SearchQuery) ([]domain.RetrievedChu
 	if _, err := tx.Exec(ctx,
 		`SET LOCAL hnsw.ef_search = `+strconv.Itoa(efSearchFor(candidates))); err != nil {
 		return nil, fmt.Errorf("setting the search depth: %w", mapError(err))
+	}
+	if _, err := tx.Exec(ctx, `SET LOCAL statement_timeout = `+
+		strconv.FormatInt(searchStatementTimeout.Milliseconds(), 10)); err != nil {
+		return nil, fmt.Errorf("setting the search timeout: %w", mapError(err))
 	}
 	rows, err := tx.Query(ctx, sql, args...)
 	if err != nil {

@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import { describe, expect, it } from 'vitest';
-import { blocks, segments } from './answer';
+import { askFailure, blocks, segments, UNREACHABLE } from './answer';
+import { ApiError } from '$api/client';
 
 describe('blocks', () => {
 	it('keeps a plain answer as one paragraph', () => {
@@ -110,5 +111,42 @@ describe('blocks, on what the model actually writes', () => {
 			{ kind: 'ul', items: ['one', 'two'] },
 			{ kind: 'p', text: 'After' }
 		]);
+	});
+});
+
+describe('askFailure', () => {
+	const busy = 'The assistant is busy right now. Try again in a minute.';
+
+	it('shows a busy model as the server words it, and as a wait', () => {
+		expect(askFailure(new ApiError('llm_unavailable', busy, 503))).toEqual({
+			message: busy,
+			busy: true
+		});
+	});
+
+	it('shows a refusing model server as a fault', () => {
+		const message = 'The assistant could not answer: its model server refused the request.';
+		expect(askFailure(new ApiError('model_error', message, 502))).toEqual({
+			message,
+			busy: false
+		});
+	});
+
+	it('words a proxy error page, which has no message of its own', () => {
+		for (const status of [502, 503, 504]) {
+			expect(askFailure(new ApiError('http_' + status, 'Bad Gateway', status))).toEqual({
+				message: UNREACHABLE,
+				busy: true
+			});
+		}
+	});
+
+	it('passes anything else through', () => {
+		expect(askFailure(new ApiError('not_found', 'conversation not found', 404))).toEqual({
+			message: 'conversation not found',
+			busy: false
+		});
+		expect(askFailure(new Error('network down'))).toEqual({ message: 'network down', busy: false });
+		expect(askFailure('odd')).toEqual({ message: 'odd', busy: false });
 	});
 });

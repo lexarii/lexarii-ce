@@ -509,3 +509,44 @@ func TestRetrieve(t *testing.T) {
 		}
 	})
 }
+
+// An answer cited in another notation is stored and returned in [n], with its
+// citations read from it, whether it was streamed or not.
+func TestAskNormalisesAnotherCitationNotation(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		t.Run(map[bool]string{false: "complete", true: "streamed"}[streaming], func(t *testing.T) {
+			model := newFakeModel(t)
+			model.answer = "Closures capture 【2†L10-L20】 their environment 【1】【2】."
+			model.answerPieces = []string{"Closures capture 【", "2†L10-L20】 their environment 【1】", "【2】."}
+			store := &pipelineStore{
+				search: func(postgres.SearchQuery) ([]domain.RetrievedChunk, error) {
+					return pipelinePassages("SICP", 2), nil
+				},
+			}
+			a := &Answerer{Store: store, Chat: model.client("fake-chat")}
+
+			var deltas strings.Builder
+			var got Answer
+			var err error
+			if streaming {
+				got, err = a.AskStreaming(t.Context(), "what is a closure?", Scope{}, nil, nil,
+					func(d string) { deltas.WriteString(d) })
+			} else {
+				got, err = a.Ask(t.Context(), "what is a closure?", Scope{})
+			}
+			if err != nil {
+				t.Fatalf("ask: %v", err)
+			}
+			const want = "Closures capture [2] their environment [1][2]."
+			if got.Text != want {
+				t.Errorf("Text = %q, want %q", got.Text, want)
+			}
+			if streaming && deltas.String() != want {
+				t.Errorf("streamed %q, want %q", deltas.String(), want)
+			}
+			if !reflect.DeepEqual(got.Cited, []int{2, 1}) {
+				t.Errorf("Cited = %v, want [2 1]", got.Cited)
+			}
+		})
+	}
+}

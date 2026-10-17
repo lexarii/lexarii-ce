@@ -4,7 +4,7 @@
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
 	import * as api from '$api/client';
-	import { blocks, segments } from '$lib/answer';
+	import { askFailure, blocks, segments, type AskFailure } from '$lib/answer';
 	import { offersAsk } from '$lib/auth/capabilities';
 	import type { ChatMessage, ConversationSummary, Source } from '$api/client';
 
@@ -55,7 +55,7 @@
 	// Which turn is being written, so it can show a cursor and nothing else has
 	// to guess whether the text is finished.
 	let streamingIndex = $state<number | null>(null);
-	let error = $state<string | null>(null);
+	let error = $state<AskFailure | null>(null);
 	let showThreads = $state(false);
 
 	// The passage list is collapsed by default. It is the evidence, and it
@@ -107,7 +107,7 @@
 			pinTo(thread.bookFileId ?? null);
 			await scrollToEnd();
 		} catch (err) {
-			error = err instanceof Error ? err.message : String(err);
+			error = askFailure(err);
 		}
 	}
 
@@ -247,7 +247,7 @@
 			void loadThreads();
 			await scrollToEnd();
 		} catch (err) {
-			error = err instanceof Error ? err.message : String(err);
+			error = askFailure(err);
 			// A failed answer leaves the question in the thread - the person
 			// asked it - but not an empty box pretending to be a reply.
 			const turn = messages[answerIndex];
@@ -426,7 +426,7 @@
 	</div>
 
 	{#if error}
-		<p class="error" role="alert">{error}</p>
+		<p class="error" class:busy={error.busy} role="alert">{error.message}</p>
 	{/if}
 
 	{#if pinnedBook}
@@ -821,6 +821,11 @@
 		margin: var(--space-2) 0 0;
 		color: var(--danger);
 		font-size: var(--text-sm);
+	}
+
+	/* A busy model is a wait, not a fault: said plainly, not in red. */
+	.error.busy {
+		color: var(--fg-muted);
 	}
 
 	.empty,

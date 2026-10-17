@@ -236,7 +236,7 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// The client going away is not an error worth reporting to it.
 		if r.Context().Err() == nil {
-			writeEvent(w, rc, "error", map[string]string{"message": err.Error()})
+			writeEvent(w, rc, "error", streamError(err))
 		}
 		return
 	}
@@ -246,7 +246,7 @@ func (h *ChatHandler) Stream(w http.ResponseWriter, r *http.Request) {
 	stored, storeErr := h.Store.AppendMessage(context.WithoutCancel(r.Context()),
 		conversation.ID, assistantMessage(answer))
 	if storeErr != nil {
-		writeEvent(w, rc, "error", map[string]string{"message": storeErr.Error()})
+		writeEvent(w, rc, "error", streamError(storeErr))
 		return
 	}
 
@@ -420,4 +420,20 @@ func conversationDTO(c postgres.Conversation) dto.Conversation {
 		out.Messages = append(out.Messages, message)
 	}
 	return out
+}
+
+// streamError is the `error` event: the same code and message a request that
+// failed before the stream opened would have carried, because the status line
+// has already gone. A wait the model server asked for travels in the details,
+// as the Retry-After header would have.
+//
+// It used to carry err.Error(), which put the model server's own reply - and
+// any internal error - in front of the person reading.
+func streamError(err error) dto.ErrorDetail {
+	f := describe(err)
+	detail := f.detail()
+	if f.retryAfter > 0 {
+		detail.Details = map[string]any{"retryAfterSeconds": retryAfterSeconds(f.retryAfter)}
+	}
+	return detail
 }

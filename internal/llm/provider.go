@@ -3,11 +3,17 @@
 package llm
 
 import (
+	"bufio"
+	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -29,7 +35,98 @@ var (
 	// ErrInsufficientCredits is a 402: the account or key has no credit left.
 	// Retrying cannot help until somebody tops it up.
 	ErrInsufficientCredits = errors.New("the model account is out of credit")
+
+	// ErrBusy is a model server that could not take the request now but might
+	// in a while: it said so (429, 408, any 5xx, a provider's own retryable
+	// code), it did not answer in time, or the answer broke off. Exactly the
+	// failures Retryable calls worth another try, plus timeouts, which are
+	// worth one later even though not straight away.
+	ErrBusy = errors.New("the model server is busy")
+	// ErrRejected is a model server that refused the request itself: a 4xx
+	// other than 408 and 429. A bad parameter, a model name it does not know,
+	// a rejected key. Asking again sends the same request and gets the same
+	// answer; somebody has to change the configuration.
+	ErrRejected = errors.New("the model server rejected the request")
+	// ErrUnreachable is a model server that could not be reached at all: the
+	// connection was refused, the name did not resolve. The ordinary state of
+	// a box in someone's house that is switched off.
+	ErrUnreachable = errors.New("the model server is unreachable")
 )
+
+// RetryAfter is how long the model server asked to be left alone, or zero
+// when it did not say.
+func RetryAfter(err error) time.Duration {
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.RetryAfter
+	}
+	return 0
+}
+
+// transportError describes a request that never got a response.
+//
+// The underlying error stays in the chain, so a cancelled context is still
+// context.Canceled and retryable() still reads it as before. What is added is
+// which of the two cases it was: no answer in time is a busy server, and no
+// connection at all is an absent one.
+//
+// Some failures to connect are not the server being away but the configuration
+// being wrong, and they will fail the same way every time: a URL that is not
+// http or https, a certificate that does not verify. Those are ErrRejected,
+// so nobody is told to try again in a minute.
+func transportError(baseURL string, err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("model unreachable at %s: %w", baseURL, err)
+	case isMisconfigured(baseURL, err):
+		return fmt.Errorf("model unreachable at %s: %w: %w", baseURL, ErrRejected, err)
+	case isTimeout(err):
+		return fmt.Errorf("model unreachable at %s: %w: %w", baseURL, ErrBusy, err)
+	}
+	return fmt.Errorf("model unreachable at %s: %w: %w", baseURL, ErrUnreachable, err)
+}
+
+// interruptedError describes a response that broke off while it was being read:
+// the server had accepted the request and then did not deliver. Busy, unless
+// the caller gave up.
+//
+// A line longer than the stream allows is the exception: the same request
+// produces the same oversized line every time, so it is ErrRejected.
+func interruptedError(what string, err error) error {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return fmt.Errorf("%s: %w", what, err)
+	case errors.Is(err, bufio.ErrTooLong):
+		return fmt.Errorf("%s: %w: %w", what, ErrRejected, err)
+	}
+	return fmt.Errorf("%s: %w: %w", what, ErrBusy, err)
+}
+
+// isMisconfigured reports a connection failure that configuration causes and
+// waiting cannot cure.
+func isMisconfigured(baseURL string, err error) bool {
+	if u, parseErr := url.Parse(baseURL); parseErr != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return true
+	}
+	var verification *tls.CertificateVerificationError
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	// Not covered: https to a server that answers in plain HTTP. net/http
+	// replaces that error with an untyped one, and matching its text would
+	// break the first time the wording changes; it reads as unreachable.
+	return errors.As(err, &verification) || errors.As(err, &unknownAuthority) ||
+		errors.As(err, &hostname) || errors.As(err, &invalid)
+}
+
+// isTimeout reports a deadline: the client's own timeout, or the caller's.
+func isTimeout(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
 
 // HTTPError is a non-200 from the model server.
 type HTTPError struct {
@@ -58,13 +155,18 @@ func (e *HTTPError) Error() string {
 	return fmt.Sprintf("model server returned %d: %s", e.Status, truncate(detail, 300))
 }
 
-// Is lets errors.Is(err, ErrUnauthorized) and ErrInsufficientCredits work.
+// Is lets errors.Is(err, ErrUnauthorized), ErrInsufficientCredits, ErrBusy
+// and ErrRejected work.
 func (e *HTTPError) Is(target error) bool {
 	switch target {
 	case ErrUnauthorized:
 		return e.Status == http.StatusUnauthorized
 	case ErrInsufficientCredits:
 		return e.Status == http.StatusPaymentRequired
+	case ErrBusy:
+		return e.Retryable()
+	case ErrRejected:
+		return e.Status >= 400 && e.Status < 500 && !e.Retryable()
 	}
 	return false
 }
@@ -211,6 +313,11 @@ func (e *ProviderError) Is(target error) bool {
 		return e.Code == "401"
 	case ErrInsufficientCredits:
 		return e.Code == "402"
+	case ErrBusy:
+		return e.Retryable()
+	case ErrRejected:
+		n, err := strconv.Atoi(e.Code)
+		return err == nil && n >= 400 && n < 500 && !e.Retryable()
 	}
 	return false
 }

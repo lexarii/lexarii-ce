@@ -235,7 +235,7 @@ func (c *Client) post(ctx context.Context, path string, body []byte, priority Pr
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return Reply{}, fmt.Errorf("model unreachable at %s: %w", c.baseURL, err)
+		return Reply{}, transportError(c.baseURL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -243,7 +243,7 @@ func (c *Client) post(ctx context.Context, path string, body []byte, priority Pr
 	// memory problem.
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
-		return Reply{}, fmt.Errorf("reading response: %w", err)
+		return Reply{}, interruptedError("reading response", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {

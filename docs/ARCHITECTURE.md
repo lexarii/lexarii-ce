@@ -108,7 +108,8 @@ question
    ├─▶ 2. SCOPE        book-level only (a conversation pinned to one book)
    │                   NOT by subject - measured harmful, see below
    │
-   ├─▶ 3. RETRIEVE     dense (pgvector cosine, HNSW)  ∪  sparse (Postgres FTS)
+   ├─▶ 3. RETRIEVE     dense (pgvector cosine, HNSW)  ∪  sparse (Postgres FTS: every
+   │                   word; with no vector, topped up with any word when that finds too few)
    │                   fuse with Reciprocal Rank Fusion, k = 60  →  ~50 candidates
    │
    ├─▶ 4. RERANK       cross-encoder, or LLM-as-reranker over titles + snippets
@@ -123,6 +124,12 @@ question
 ```
 
 **Why hybrid and not pure vector search:** a technical library is full of proper nouns, symbols, and rare terms — exactly where dense retrieval fails and BM25 shines. Dense-only retrieval looks fine in a demo and disappoints on the first real question.
+
+**Why the keyword arm falls back to any word, and only without a vector:** full-text search ANDs every word of the question, which suits "loop invariant" and fails a sentence. "Why does Victor Frankenstein abandon the creature?" needs a passage with all four of victor, frankenstein, abandon and creature, and a library can have hundreds that say it with three. With no embedding model (or when embedding the question fails) the keyword arm is the whole search, so the question found nothing. Then, when requiring every word finds fewer passages than were asked for, the question's words are searched ORed, ranked by how many of them a passage has and then by cover density, and appended after the strict matches. When the strict search finds enough, the fallback never runs. A question that excludes a word (`-word`) gets no fallback, since any-word matching would bring the excluded word back.
+
+With a vector there is no fallback, and hybrid search is exactly what it was. The meaning arm already finds passages that share only some of the words, and the fallback's passages entered the fusion at full weight: a passage sharing one common word with the question outranked the best passage by meaning.
+
+The fallback is the one part of a search whose cost depends on the question, so it is bounded three ways. It searches at most 16 words: those in no passage are dropped (one index probe each), and of the rest the ones the column statistics list as common go last. Only a pool of 4× the candidates, chosen by word count, is ranked by cover density. And the statement runs under a 5-second `statement_timeout`; a search that hits it is run again without the fallback, and logged. On 30,000 synthetic passages a 400-word question took 3.0 s before the word cap and about 0.1 s after; the question above takes about 20 ms.
 
 **Why routing comes first:** `"how many unread books do I have"` needs SQL and zero retrieval. `"which book covers category theory"` needs Work-level metadata, not passages. Sending everything down the same path burns the local model's context on questions that never needed it.
 

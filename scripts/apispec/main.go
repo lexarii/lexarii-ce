@@ -160,6 +160,34 @@ func generate(dtoDir, pathsFile string) ([]byte, error) {
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
+    ModelBusy:
+      description: |
+        The chat model is busy, did not answer in time, or cannot be reached.
+        Error code llm_unavailable. Asking again later may work. Only asking
+        is affected: the library and the reader never depend on the model.
+      headers:
+        Retry-After:
+          description: |
+            Seconds to wait before asking again: the model server's own
+            Retry-After when it sent one, otherwise 60.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ModelError:
+      description: |
+        The chat model server refused the request itself - a bad parameter, a
+        model it does not have, a rejected key, a certificate that does not
+        verify - or answered with nothing usable: an empty answer, or one cut
+        off before it began. Error code model_error. Asking again will not
+        help; the server log names the reason, and the model server's own
+        words are never sent to the client.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
 `)
 	return b.Bytes(), nil
 }

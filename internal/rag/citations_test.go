@@ -76,3 +76,114 @@ func TestNothingFoundIsSaidPlainly(t *testing.T) {
 		}
 	}
 }
+
+// Every notation a model has been seen to cite in becomes the one the rest of
+// the system reads, and nothing else changes.
+func TestNormaliseCitations(t *testing.T) {
+	tests := []struct {
+		name, in, want string
+	}{
+		{"plain markers are left alone", "As shown [1] and [12].", "As shown [1] and [12]."},
+		{"lenticular brackets", "Victor flees 【1】.", "Victor flees [1]."},
+		{"lenticular with a dagger and a line range", "He abandons it 【3†L10-L20】.", "He abandons it [3]."},
+		{"lenticular with a dagger and a word", "See 【2†source】.", "See [2]."},
+		{"lenticular with spaces inside", "See 【 4 】 and 【5 †L1】.", "See [4] and [5]."},
+		{"three digits", "See 【120†L1】.", "See [120]."},
+		{"ASCII with a dagger", "See [1†L10-L20].", "See [1]."},
+		{"adjacent lenticular", "Both say so 【1】【2】.", "Both say so [1][2]."},
+		{"adjacent with daggers", "Both 【1†L1-L2】【2†L8】 and [3†a][4†b].", "Both [1][2] and [3][4]."},
+		{"adjacent plain stays as it is", "Both [1][2].", "Both [1][2]."},
+		{"mixed in one answer", "One [1], two 【2】, three [3†L4].", "One [1], two [2], three [3]."},
+		{"at the very start and end", "【1】 begins, ends 【2†x】", "[1] begins, ends [2]"},
+
+		// Not markers, and so not touched.
+		{"lenticular around words", "The heading 【Note】 stays.", "The heading 【Note】 stays."},
+		{"lenticular with four digits", "A year 【1818】.", "A year 【1818】."},
+		{"ASCII without a dagger", "An index [i] and [sic].", "An index [i] and [sic]."},
+		{"a dagger in prose", "The obituary marks him † 1851 [2].", "The obituary marks him † 1851 [2]."},
+		{"an unclosed bracket", "Text 【1†L10 and on", "Text 【1†L10 and on"},
+		{"a marker cannot span a line", "【1†L1\nL2】", "【1†L1\nL2】"},
+		{"a suffix too long to be a locator", "【1†" + strings.Repeat("x", 41) + "】", "【1†" + strings.Repeat("x", 41) + "】"},
+		{"a suffix exactly as long as allowed", "【1†" + strings.Repeat("x", 40) + "】", "[1]"},
+		{"mismatched brackets", "【1] and [2】", "【1] and [2】"},
+		{"empty", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := NormaliseCitations(tt.in); got != tt.want {
+				t.Errorf("NormaliseCitations(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// Normalised markers are what CitedNumbers reads, so the sources are linked.
+func TestNormalisedCitationsAreCited(t *testing.T) {
+	answer := NormaliseCitations("He flees 【2†L10-L20】, then returns 【1】【2】 and [3†L4].")
+	if got, want := CitedNumbers(answer, 5), []int{2, 1, 3}; !reflect.DeepEqual(got, want) {
+		t.Errorf("CitedNumbers = %v, want %v", got, want)
+	}
+}
+
+// However a streamed answer is cut into pieces - including through the middle
+// of a marker, and through the middle of a multi-byte bracket - the pieces it
+// emits join to exactly the normalised whole.
+func TestCitationStreamAgreesWithTheWholeAnswer(t *testing.T) {
+	answers := []string{
+		"Victor flees 【1†L10-L20】 and the creature 【2】【3】 is left [4†L1]. End [5].",
+		"An array [i] is not a citation, nor is 【Note】, but 【12】 is.",
+		"Unclosed at the end 【1†L4",
+		"A line break 【1\n】 and a long one 【2†" + strings.Repeat("y", 60) + "】 then 【3】",
+		"",
+	}
+	for _, answer := range answers {
+		want := NormaliseCitations(answer)
+
+		// Every two-piece split, at every byte.
+		for cut := 0; cut <= len(answer); cut++ {
+			if got := streamed(answer[:cut], answer[cut:]); got != want {
+				t.Fatalf("split at byte %d of %q:\n got %q\nwant %q", cut, answer, got, want)
+			}
+		}
+		// One byte at a time, the worst a server could do.
+		pieces := make([]string, 0, len(answer))
+		for i := range len(answer) {
+			pieces = append(pieces, answer[i:i+1])
+		}
+		if got := streamed(pieces...); got != want {
+			t.Fatalf("byte by byte %q:\n got %q\nwant %q", answer, got, want)
+		}
+	}
+}
+
+// Text with no brackets in it is passed on as it arrives, not held.
+func TestCitationStreamDoesNotHoldPlainText(t *testing.T) {
+	var got []string
+	s := newCitationStream(func(p string) { got = append(got, p) })
+	s.write("Closures ")
+	s.write("capture [1]. ")
+	s.write("Then 【")
+	if want := []string{"Closures ", "capture [1]. ", "Then "}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("emitted %q, want %q", got, want)
+	}
+	s.write("2†L4】.")
+	s.flush()
+	if want := []string{"Closures ", "capture [1]. ", "Then ", "[2]."}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("emitted %q, want %q", got, want)
+	}
+}
+
+func streamed(pieces ...string) string {
+	var b strings.Builder
+	s := newCitationStream(func(p string) {
+		if p == "" {
+			panic("an empty piece was emitted")
+		}
+		b.WriteString(p)
+	})
+	for _, p := range pieces {
+		s.write(p)
+	}
+	s.flush()
+	return b.String()
+}

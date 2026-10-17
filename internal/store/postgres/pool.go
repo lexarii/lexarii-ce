@@ -65,6 +65,7 @@ const (
 	codeUniqueViolation     = "23505"
 	codeForeignKeyViolation = "23503"
 	codeCheckViolation      = "23514"
+	codeQueryCanceled       = "57014"
 )
 
 // mapError translates pgx and Postgres errors into store sentinels, so nothing
